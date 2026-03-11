@@ -1,0 +1,43 @@
+{
+  "app_name": "RiskGate",
+  "engine_version": "0.2.0",
+  "created_at_utc": "2026-03-11T14:06:53.989990+00:00",
+  "random_state": 0,
+  "train_csv": "data\\raw\\lc_trainingset.csv",
+  "training_rows_total": 316824,
+  "training_rows_dev": 221776,
+  "validation_rows": 95048,
+  "chosen_model_name": "xgb",
+  "chosen_xgb_params": {
+    "random_state": 0,
+    "reg_lambda": 2,
+    "reg_alpha": 5,
+    "max_depth": 4,
+    "learning_rate": 0.26,
+    "gamma": 0.4,
+    "colsample_bytree": 1.0,
+    "objective": "binary:logistic",
+    "eval_metric": "logloss",
+    "tree_method": "hist",
+    "n_jobs": -1
+  },
+  "calibration_method": "sigmoid",
+  "calibration_cv": 5,
+  "target_col": "loan_status",
+  "target_binary_col": "target_default",
+  "label_map": {
+    "Fully Paid": 0,
+    "Charged Off": 1
+  },
+  "policy_thresholds": {
+    "t_low": 0.1,
+    "t_high": 0.28
+  },
+  "notebook_reference_metrics": {
+    "roc_auc": 0.9097792632943688,
+    "average_precision": 0.7852013757526998,
+    "brier_uncalibrated": 0.0807392954093243,
+    "best_binary_threshold": 0.35
+  },
+  "notes": "Frozen notebook recipe used for XGBoost model family and operating logic. Final saved artifact was rebuilt cleanly for reusable scoring."
+}

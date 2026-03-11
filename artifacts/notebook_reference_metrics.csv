@@ -1,0 +1,2 @@
+model_name,roc_auc_reference,average_precision_reference,brier_uncalibrated_reference,best_binary_threshold_reference
+xgb_frozen_from_notebook,0.9097792632943688,0.7852013757526998,0.0807392954093243,0.35

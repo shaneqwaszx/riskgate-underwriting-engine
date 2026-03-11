@@ -1,0 +1,16 @@
+{
+  "t_low": 0.1,
+  "t_high": 0.28,
+  "approve_rate": 0.5990446932076424,
+  "review_rate": 0.20606430435148557,
+  "reject_rate": 0.19489100244087199,
+  "approve_observed_default_rate": 0.03846288945870947,
+  "review_observed_default_rate": 0.21147758603083835,
+  "reject_observed_default_rate": 0.6668106240552797,
+  "nonrejected_observed_default_rate": 0.08274528252574356,
+  "approve_avg_pd": 0.04523415554926715,
+  "review_avg_pd": 0.1669258871330144,
+  "reject_avg_pd": 0.6940455298359991,
+  "risk_proxy_nonrejected": 80543195.24583541,
+  "risk_proxy_approved_only": 34165498.44763355
+}

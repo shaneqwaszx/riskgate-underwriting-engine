@@ -1,0 +1,6 @@
+{
+  "model_name": "xgb_calibrated",
+  "roc_auc": 0.9093626291450382,
+  "average_precision": 0.7854245371827727,
+  "brier": 0.08243155457110049
+}
