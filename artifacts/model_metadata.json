@@ -1,7 +1,7 @@
 {
   "app_name": "RiskGate",
   "engine_version": "0.2.0",
-  "created_at_utc": "2026-03-11T14:06:53.989990+00:00",
+  "created_at_utc": "2026-03-11T17:12:02.071492+00:00",
   "random_state": 0,
   "train_csv": "data\\raw\\lc_trainingset.csv",
   "training_rows_total": 316824,
