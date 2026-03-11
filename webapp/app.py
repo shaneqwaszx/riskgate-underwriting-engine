@@ -7,6 +7,9 @@ import hashlib
 import platform
 from pathlib import Path
 
+import inspect
+import riskgate.features as rg_features
+
 # --------------------------------------------------
 # Make project root importable before joblib unpickles
 # --------------------------------------------------
@@ -440,6 +443,10 @@ def compute_default_parity_summary(model, default_input_path: Path, thresholds: 
         "first_20_pd_scores": [float(x) for x in pd_scores[:20]],
     }
 
+def text_sha256(text: str) -> str:
+    import hashlib
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
 # --------------------------------------------------
 # Load engine bundle
 # --------------------------------------------------
@@ -460,6 +467,12 @@ default_parity_summary = compute_default_parity_summary(
 )
 
 runtime_identity = build_runtime_identity(DEFAULT_BUNDLE_PATH, DEFAULT_INPUT_PATH, metadata, model)
+
+code_identity = {
+    "features_module_path": str(Path(rg_features.__file__).resolve()),
+    "features_module_file_sha256": file_sha256(Path(rg_features.__file__).resolve()),
+    "loan_feature_builder_source_sha256": text_sha256(inspect.getsource(rg_features.LoanFeatureBuilder)),
+}
 
 st.title("RiskGate: Automated Underwriting Policy Engine")
 st.caption("Local scoring prototype for calibrated PD-based approve / review / reject decisioning")
@@ -827,6 +840,9 @@ if run_button:
 
         st.subheader("App build")
         st.code(APP_BUILD)
+
+        st.subheader("Code identity")
+        st.json(code_identity)
 
     with tab4:
         st.subheader("Download outputs")
