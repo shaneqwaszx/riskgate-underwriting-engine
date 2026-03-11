@@ -11,22 +11,29 @@ import inspect
 import riskgate.features as rg_features
 import riskgate.config as rg_config
 
-# --------------------------------------------------
-# Make project root importable before joblib unpickles
-# --------------------------------------------------
+import sys
+from pathlib import Path
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import json
+import hashlib
+import inspect
+import platform
+
 import joblib
-import sklearn
-import xgboost
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
-
+import sklearn
 import streamlit as st
+import xgboost
+
+import riskgate.features as rg_features
+import riskgate.config as rg_config
 
 from webapp.assistant import (
     assign_decision,
@@ -514,11 +521,13 @@ default_parity_summary = compute_default_parity_summary(
     thresholds=frozen_thresholds
 )
 
-runtime_identity = build_runtime_identity(DEFAULT_BUNDLE_PATH, DEFAULT_INPUT_PATH, metadata, model)
-pipeline_debug = get_pipeline_debug(bundle, pd.read_csv(DEFAULT_INPUT_PATH), n=5)
 
-import inspect
-import riskgate.features as rg_features
+runtime_identity = build_runtime_identity(DEFAULT_BUNDLE_PATH, DEFAULT_INPUT_PATH, metadata, model)
+
+
+
+
+
 
 def safe_source_hash(obj):
     try:
@@ -923,8 +932,7 @@ if run_button:
         st.subheader("Config identity")
         st.json(config_identity)
 
-        st.subheader("Pipeline debug")
-        st.json(pipeline_debug)
+
 
     with tab4:
         st.subheader("Download outputs")
@@ -944,3 +952,4 @@ if run_button:
             file_name="scoring_summary.json",
             mime="application/json"
         )
+        
