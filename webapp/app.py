@@ -1,3 +1,5 @@
+from textwrap import dedent
+
 import sys
 from pathlib import Path
 
@@ -94,7 +96,7 @@ st.markdown("""
 }
 .reco-grid {
     display: grid;
-    grid-template-columns: repeat(4, minmax(120px, 1fr));
+    grid-template-columns: repeat(2, minmax(140px, 1fr));
     gap: 10px;
     margin-top: 10px;
 }
@@ -122,8 +124,66 @@ st.markdown("""
     margin-top: 10px;
     margin-bottom: 12px;
 }
+
+/* Floating assistant launcher */
+div.st-key-assistant_launcher {
+    position: fixed;
+    right: 24px;
+    bottom: 24px;
+    width: 220px;
+    z-index: 999999;
+}
+div.st-key-assistant_launcher button {
+    width: 100%;
+    border-radius: 999px;
+    background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+    color: white;
+    border: none;
+    box-shadow: 0 10px 25px rgba(37,99,235,0.35);
+    font-weight: 700;
+}
+
+/* Floating drawer */
+div.st-key-assistant_drawer {
+    position: fixed;
+    right: 24px;
+    bottom: 88px;
+    width: 430px;
+    max-height: 72vh;
+    overflow-y: auto;
+    z-index: 999998;
+    background: linear-gradient(180deg, #0f172a 0%, #111827 100%);
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    border-radius: 18px;
+    padding: 16px 16px 8px 16px;
+    box-shadow: 0 18px 45px rgba(0, 0, 0, 0.35);
+}
+
+/* Nice section inside drawer */
+.assistant-section {
+    background: rgba(255,255,255,0.035);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 12px;
+    padding: 12px 14px;
+    margin-bottom: 12px;
+}
+.assistant-section h4 {
+    margin: 0 0 8px 0;
+    color: #93c5fd;
+    font-size: 0.95rem;
+}
+.assistant-muted {
+    color: #cbd5e1;
+    font-size: 0.88rem;
+}
 </style>
 """, unsafe_allow_html=True)
+
+if "show_assistant_drawer" not in st.session_state:
+    st.session_state.show_assistant_drawer = False
+
+if "use_frozen_thresholds" not in st.session_state:
+    st.session_state.use_frozen_thresholds = True
 
 DEFAULT_BUNDLE_PATH = PROJECT_ROOT / "artifacts" / "final_model_bundle.joblib"
 DEFAULT_INPUT_PATH = PROJECT_ROOT / "data" / "scored" / "new_applications_to_score.csv"
@@ -218,39 +278,128 @@ def render_recommendation_card(goal: str, recommendation_df: pd.DataFrame):
 
     top = recommendation_df.iloc[0]
 
-    st.markdown(
-        f"""
-        <div class="reco-card">
-            <div class="reco-title">Policy assistant recommendation</div>
-            <div class="reco-main">
-                Recommended setting for <b>{goal}</b>:
-                <span style="color:#93c5fd;">t_low = {top['t_low']:.2f}</span>
-                and
-                <span style="color:#93c5fd;">t_high = {top['t_high']:.2f}</span>
-            </div>
+    html = dedent(f"""
+    <div class="reco-card">
+        <div class="reco-title">Policy assistant recommendation</div>
+        <div class="reco-main">
+            Recommended setting for <b>{goal}</b>:
+            <span style="color:#93c5fd;">t_low = {top['t_low']:.2f}</span>
+            and
+            <span style="color:#93c5fd;">t_high = {top['t_high']:.2f}</span>
+        </div>
 
-            <div class="reco-grid">
-                <div class="reco-metric">
-                    <div class="reco-label">Approve rate</div>
-                    <div class="reco-value">{top['approve_rate']:.1%}</div>
-                </div>
-                <div class="reco-metric">
-                    <div class="reco-label">Review rate</div>
-                    <div class="reco-value">{top['review_rate']:.1%}</div>
-                </div>
-                <div class="reco-metric">
-                    <div class="reco-label">Reject rate</div>
-                    <div class="reco-value">{top['reject_rate']:.1%}</div>
-                </div>
-                <div class="reco-metric">
-                    <div class="reco-label">Non-rejected risk proxy</div>
-                    <div class="reco-value">{top['risk_proxy_nonreject']:,.0f}</div>
-                </div>
+        <div class="reco-grid">
+            <div class="reco-metric">
+                <div class="reco-label">Approve rate</div>
+                <div class="reco-value">{top['approve_rate']:.1%}</div>
+            </div>
+            <div class="reco-metric">
+                <div class="reco-label">Review rate</div>
+                <div class="reco-value">{top['review_rate']:.1%}</div>
+            </div>
+            <div class="reco-metric">
+                <div class="reco-label">Reject rate</div>
+                <div class="reco-value">{top['reject_rate']:.1%}</div>
+            </div>
+            <div class="reco-metric">
+                <div class="reco-label">Non-rejected risk proxy</div>
+                <div class="reco-value">{top['risk_proxy_nonreject']:,.0f}</div>
             </div>
         </div>
-        """,
-        unsafe_allow_html=True
-    )
+    </div>
+    """).strip()
+
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def open_assistant():
+    st.session_state.show_assistant_drawer = True
+
+
+def close_assistant():
+    st.session_state.show_assistant_drawer = False
+
+
+def apply_top_recommendation(recommendation_df: pd.DataFrame):
+    if recommendation_df.empty:
+        return
+
+    top = recommendation_df.iloc[0]
+    st.session_state.use_frozen_thresholds = False
+    st.session_state.t_low_slider = float(top["t_low"])
+    st.session_state.t_high_slider = float(top["t_high"])
+    st.session_state.show_assistant_drawer = False
+
+
+def render_policy_assistant_drawer(goal: str, recommendation_df: pd.DataFrame, scenario_grid: pd.DataFrame, ai_text: str | None = None):
+    if not st.session_state.show_assistant_drawer:
+        return
+
+    with st.container(key="assistant_drawer"):
+        top = recommendation_df.iloc[0] if not recommendation_df.empty else None
+
+        head_col1, head_col2 = st.columns([0.84, 0.16])
+        with head_col1:
+            st.markdown("### 💡 Policy Assistant")
+        with head_col2:
+            st.button("✕", key="assistant_close_btn", on_click=close_assistant)
+
+        if top is not None:
+            st.markdown(
+                f"""
+                <div class="assistant-section">
+                    <h4>Top recommendation</h4>
+                    <div class="assistant-muted">
+                        For <b>{goal}</b>, the strongest current setting is
+                        <b>t_low = {top['t_low']:.2f}</b> and
+                        <b>t_high = {top['t_high']:.2f}</b>.
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+            render_recommendation_card(goal, recommendation_df)
+
+            if st.button("Apply this recommendation to threshold sliders", key="apply_top_reco_btn", use_container_width=True):
+                apply_top_recommendation(recommendation_df)
+                st.rerun()
+
+        with st.expander("Explain the business goals", expanded=True):
+            st.markdown("""
+            **Balanced**  
+            Tries to maintain a healthy approval rate while penalizing excessive retained risk and avoiding review overload.
+
+            **Growth**  
+            Favours higher approvals and conversion, while still applying a lighter penalty to retained risk.
+
+            **Conservative**  
+            Prioritizes lower retained risk in the non-rejected pool, even if approval volume falls.
+
+            **Operations-first**  
+            Prioritizes a smaller review queue so the underwriting team can manage workload more easily.
+            """)
+
+        with st.expander("How the assistant derives recommendations", expanded=False):
+            st.markdown("""
+            The assistant evaluates many threshold pairs (`t_low`, `t_high`) and estimates their impact on:
+            - approval rate
+            - review rate
+            - reject rate
+            - average PD in each decision bucket
+            - retained risk proxy in the non-rejected population
+
+            It then ranks threshold pairs according to the selected business goal and the operational constraints set on the page.
+            """)
+
+        with st.expander("Top threshold scenarios", expanded=False):
+            st.dataframe(recommendation_df, use_container_width=True, height=220)
+
+        if ai_text:
+            st.markdown(
+                f'<div class="helper-box"><b>AI explanation:</b><br>{ai_text}</div>',
+                unsafe_allow_html=True
+            )
 
 # --------------------------------------------------
 # Load engine bundle
@@ -275,13 +424,37 @@ left_col, right_col = st.columns([1.1, 1.0])
 with left_col:
     st.subheader("Threshold controls")
 
-    use_frozen_thresholds = st.checkbox("Use frozen engine thresholds", value=True)
+    use_frozen_thresholds = st.checkbox(
+        "Use frozen engine thresholds",
+        value=st.session_state.use_frozen_thresholds,
+        key="use_frozen_thresholds"
+    )
 
     default_t_low = float(frozen_thresholds["t_low"])
     default_t_high = float(frozen_thresholds["t_high"])
 
-    t_low = st.slider("Auto-approve threshold (t_low)", 0.01, 0.40, default_t_low, 0.01)
-    t_high = st.slider("Auto-reject threshold (t_high)", 0.05, 0.80, default_t_high, 0.01)
+    if "t_low_slider" not in st.session_state:
+        st.session_state.t_low_slider = default_t_low
+    if "t_high_slider" not in st.session_state:
+        st.session_state.t_high_slider = default_t_high
+
+    t_low = st.slider(
+        "Auto-approve threshold (t_low)",
+        0.01, 0.40,
+        st.session_state.t_low_slider,
+        0.01,
+        key="t_low_slider",
+        disabled=use_frozen_thresholds
+    )
+
+    t_high = st.slider(
+        "Auto-reject threshold (t_high)",
+        0.05, 0.80,
+        st.session_state.t_high_slider,
+        0.01,
+        key="t_high_slider",
+        disabled=use_frozen_thresholds
+    )
 
     if use_frozen_thresholds:
         t_low = default_t_low
@@ -331,15 +504,15 @@ with right_col:
     )
 
     use_ollama = st.checkbox(
-        "Use local Ollama explanation",
+        "Use Ollama Cloud explanation",
         value=False,
-        help="Optional local AI explanation layer. Best used only in local demos, not cloud deployment."
+        help="Optional advisory AI explanation using Ollama's hosted API."
     )
 
     ollama_model_name = st.text_input(
         "Ollama model name",
-        value="llama3.1:8b",
-        help="Example local model name if Ollama is enabled."
+        value=st.secrets.get("OLLAMA_MODEL", "gpt-oss:120b"),
+        help="Hosted Ollama model name used for threshold recommendation explanations."
     )
 
     with st.expander("How the policy assistant derives recommendations", expanded=False):
@@ -470,6 +643,9 @@ recommendation_df = recommend_thresholds(
     min_approve_rate=min_approve_rate
 )
 
+
+ai_text = None
+
 if use_ollama:
     prompt = f"""
 You are helping an underwriting analyst choose thresholds for a triage policy.
@@ -483,10 +659,9 @@ Top candidate threshold pairs:
 Provide a short practical recommendation in plain English.
 """
     ai_text = ollama_explanation(prompt, model_name=ollama_model_name)
-    render_recommendation_card(goal, recommendation_df)
-    st.markdown(f'<div class="helper-box"><b>AI explanation:</b><br>{ai_text}</div>', unsafe_allow_html=True)
-else:
-    render_recommendation_card(goal, recommendation_df)
+
+st.button("💡 Policy Assistant", key="assistant_launcher", on_click=open_assistant)
+render_policy_assistant_drawer(goal, recommendation_df, scenario_grid, ai_text=ai_text)
 
 # --------------------------------------------------
 # Execute engine
@@ -571,6 +746,14 @@ if run_button:
             "input_dataset": input_name,
             "t_low_used": t_low,
             "t_high_used": t_high
+        })
+
+        st.subheader("Deployment identity")
+        st.json({
+            "bundle_created_at": metadata.get("created_at_utc"),
+            "engine_version": metadata.get("engine_version"),
+            "input_rows": len(input_df),
+            "thresholds_in_bundle": frozen_thresholds,
         })
 
     with tab4:
