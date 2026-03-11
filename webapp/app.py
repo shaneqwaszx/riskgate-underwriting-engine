@@ -136,11 +136,13 @@ DEFAULT_INPUT_PATH = PROJECT_ROOT / "data" / "scored" / "new_applications_to_sco
 def load_bundle(bundle_path: str):
     return joblib.load(bundle_path)
 
-
 @st.cache_data
 def load_csv_from_path(path: str):
     return pd.read_csv(path)
 
+@st.cache_data
+def load_upload_template(path: str):
+    return pd.read_csv(path)
 
 def score_dataframe(model, raw_df: pd.DataFrame, t_low: float, t_high: float) -> pd.DataFrame:
     pd_scores = model.predict_proba(raw_df)[:, 1]
