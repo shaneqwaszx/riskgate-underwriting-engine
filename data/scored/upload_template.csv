@@ -1,0 +1,3 @@
+application_id,loan_amnt,installment,int_rate,annual_inc,dti,open_acc,pub_rec,revol_bal,revol_util,total_acc,mort_acc,pub_rec_bankruptcies,term,emp_length,grade,sub_grade,home_ownership,verification_status,purpose,application_type,initial_list_status,issue_d,earliest_cr_line,address,zip_code,state,addr_state
+A001,10000,320.15,12.99,55000,16.2,8,0,5400,48.3,22,1,0,36 months,5 years,B,B3,RENT,Verified,debt_consolidation,INDIVIDUAL,w,Jan-2019,Jun-2010,"123 Main St NY 10001",10001,NY,NY
+A002,18000,512.40,15.49,72000,19.5,10,0,8200,62.7,28,2,0,60 months,10+ years,C,C2,MORTGAGE,Source Verified,credit_card,INDIVIDUAL,f,Mar-2020,Sep-2008,"456 Oak Ave CA 90012",90012,CA,CA
