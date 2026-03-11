@@ -468,10 +468,25 @@ default_parity_summary = compute_default_parity_summary(
 
 runtime_identity = build_runtime_identity(DEFAULT_BUNDLE_PATH, DEFAULT_INPUT_PATH, metadata, model)
 
+import inspect
+import riskgate.features as rg_features
+
+def safe_source_hash(obj):
+    try:
+        return text_sha256(inspect.getsource(obj))
+    except Exception as e:
+        return f"unavailable: {e}"
+    
 code_identity = {
     "features_module_path": str(Path(rg_features.__file__).resolve()),
     "features_module_file_sha256": file_sha256(Path(rg_features.__file__).resolve()),
-    "loan_feature_builder_source_sha256": text_sha256(inspect.getsource(rg_features.LoanFeatureBuilder)),
+    "loan_feature_builder_source_sha256": safe_source_hash(rg_features.LoanFeatureBuilder),
+    "_safe_to_datetime_sha256": safe_source_hash(rg_features._safe_to_datetime),
+    "_month_diff_sha256": safe_source_hash(rg_features._month_diff),
+    "_extract_zip_code_sha256": safe_source_hash(rg_features._extract_zip_code),
+    "_extract_state_sha256": safe_source_hash(rg_features._extract_state),
+    "_parse_term_months_sha256": safe_source_hash(rg_features._parse_term_months),
+    "_parse_emp_length_years_sha256": safe_source_hash(rg_features._parse_emp_length_years),
 }
 
 st.title("RiskGate: Automated Underwriting Policy Engine")
