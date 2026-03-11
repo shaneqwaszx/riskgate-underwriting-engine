@@ -1,6 +1,7 @@
 from textwrap import dedent
 
 import sys
+import hashlib
 from pathlib import Path
 
 # --------------------------------------------------
@@ -71,51 +72,7 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-.reco-card {
-    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-    border: 1px solid rgba(148, 163, 184, 0.25);
-    border-radius: 16px;
-    padding: 18px 20px;
-    margin-top: 8px;
-    margin-bottom: 18px;
-    box-shadow: 0 8px 24px rgba(0,0,0,0.18);
-}
-.reco-title {
-    font-size: 0.9rem;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    color: #93c5fd;
-    margin-bottom: 10px;
-}
-.reco-main {
-    font-size: 1.05rem;
-    font-weight: 600;
-    color: #f8fafc;
-    margin-bottom: 12px;
-}
-.reco-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(140px, 1fr));
-    gap: 10px;
-    margin-top: 10px;
-}
-.reco-metric {
-    background: rgba(255,255,255,0.04);
-    border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 12px;
-    padding: 10px 12px;
-}
-.reco-label {
-    font-size: 0.78rem;
-    color: #cbd5e1;
-    margin-bottom: 4px;
-}
-.reco-value {
-    font-size: 1rem;
-    font-weight: 700;
-    color: #ffffff;
-}
+            
 .helper-box {
     background: rgba(255,255,255,0.03);
     border-left: 4px solid #38bdf8;
@@ -142,16 +99,25 @@ DEFAULT_INPUT_PATH = PROJECT_ROOT / "data" / "scored" / "new_applications_to_sco
 # --------------------------------------------------
 # Helpers
 # --------------------------------------------------
+def file_sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
 @st.cache_resource
-def load_bundle(bundle_path: str):
+def load_bundle(bundle_path: str, bundle_mtime: float):
     return joblib.load(bundle_path)
 
-@st.cache_data
-def load_csv_from_path(path: str):
-    return pd.read_csv(path)
 
 @st.cache_data
-def load_upload_template(path: str):
+def load_csv_from_path(path: str, file_mtime: float):
+    return pd.read_csv(path)
+
+
+@st.cache_data
+def load_upload_template(path: str, file_mtime: float):
     return pd.read_csv(path)
 
 def score_dataframe(model, raw_df: pd.DataFrame, t_low: float, t_high: float) -> pd.DataFrame:
@@ -357,16 +323,14 @@ def render_policy_assistant_sidebar(goal: str, recommendation_df: pd.DataFrame, 
     with st.sidebar:
         st.markdown("## 💡 Policy Assistant")
 
-        if not recommendation_df.empty:
-            render_recommendation_card(goal, recommendation_df)
+        with st.container(border=True):
+            render_recommendation_panel(goal, recommendation_df)
 
-            if st.button("Apply recommended thresholds", use_container_width=True):
-                apply_top_recommendation(recommendation_df)
-                st.rerun()
-        else:
-            st.warning("No feasible threshold recommendation is available for the current constraints.")
+        if st.button("Apply recommended thresholds", use_container_width=True):
+            apply_top_recommendation(recommendation_df)
+            st.rerun()
 
-        with st.expander("Explain the business goals", expanded=True):
+        with st.expander("Explain the business goals", expanded=False):
             st.markdown("""
             **Balanced**  
             Tries to maintain a healthy approval rate while penalizing excessive retained risk and avoiding review overload.
@@ -397,11 +361,44 @@ def render_policy_assistant_sidebar(goal: str, recommendation_df: pd.DataFrame, 
             st.dataframe(recommendation_df, use_container_width=True, height=220)
 
         if ai_text:
-            st.markdown(
-                f'<div class="helper-box"><b>AI explanation:</b><br>{ai_text}</div>',
-                unsafe_allow_html=True
-            )
-            
+            st.info(ai_text)
+
+def render_recommendation_panel(goal: str, recommendation_df: pd.DataFrame):
+    if recommendation_df.empty:
+        st.warning(
+            "No feasible threshold pair met the requested constraints. "
+            "Try loosening the review-rate cap or reducing the minimum approve-rate target."
+        )
+        return
+
+    top = recommendation_df.iloc[0]
+
+    st.caption("POLICY ASSISTANT RECOMMENDATION")
+    st.markdown(
+        f"**Recommended setting for {goal}:**  \n"
+        f"`t_low = {top['t_low']:.2f}` and `t_high = {top['t_high']:.2f}`"
+    )
+
+    col1, col2 = st.columns(2)
+    col1.metric("Approve rate", f"{top['approve_rate']:.1%}")
+    col2.metric("Review rate", f"{top['review_rate']:.1%}")
+
+    col3, col4 = st.columns(2)
+    col3.metric("Reject rate", f"{top['reject_rate']:.1%}")
+    col4.metric("Risk proxy", f"{top['risk_proxy_nonreject']:,.0f}")
+
+def build_runtime_identity(bundle_path: Path, default_input_path: Path, metadata: dict) -> dict:
+    identity = {
+        "bundle_path": str(bundle_path),
+        "bundle_sha256": file_sha256(bundle_path) if bundle_path.exists() else "missing",
+        "bundle_created_at": metadata.get("created_at_utc"),
+        "engine_version": metadata.get("engine_version"),
+        "thresholds_in_bundle": metadata.get("policy_thresholds"),
+        "default_input_path": str(default_input_path),
+        "default_input_sha256": file_sha256(default_input_path) if default_input_path.exists() else "missing",
+    }
+    return identity
+
 # --------------------------------------------------
 # Load engine bundle
 # --------------------------------------------------
@@ -409,10 +406,13 @@ if not DEFAULT_BUNDLE_PATH.exists():
     st.error("Model bundle not found at artifacts/final_model_bundle.joblib")
     st.stop()
 
-bundle = load_bundle(str(DEFAULT_BUNDLE_PATH))
+bundle_mtime = DEFAULT_BUNDLE_PATH.stat().st_mtime
+bundle = load_bundle(str(DEFAULT_BUNDLE_PATH), bundle_mtime)
 model = bundle["model"]
 frozen_thresholds = bundle["thresholds"]
 metadata = bundle["metadata"]
+
+runtime_identity = build_runtime_identity(DEFAULT_BUNDLE_PATH, DEFAULT_INPUT_PATH, metadata)
 
 st.title("RiskGate: Automated Underwriting Policy Engine")
 st.caption("Local scoring prototype for calibrated PD-based approve / review / reject decisioning")
@@ -588,7 +588,10 @@ with st.expander("Show required CSV format before upload", expanded=False):
     """)
 
     if template_path.exists():
-        template_df = load_upload_template(str(template_path))
+        template_df = load_upload_template(
+            str(template_path),
+            template_path.stat().st_mtime
+        )
         st.dataframe(template_df, use_container_width=True)
 
         st.download_button(
@@ -626,7 +629,10 @@ elif use_default_dataset:
     if not DEFAULT_INPUT_PATH.exists():
         st.error("Default scoring dataset not found.")
         st.stop()
-    input_df = load_csv_from_path(str(DEFAULT_INPUT_PATH))
+    input_df = load_csv_from_path(
+        str(DEFAULT_INPUT_PATH),
+        DEFAULT_INPUT_PATH.stat().st_mtime
+    )
     input_name = str(DEFAULT_INPUT_PATH)
 else:
     st.info("Upload a file or enable the default dataset.")
@@ -740,6 +746,9 @@ if run_button:
     with tab3:
         st.subheader("Engine metadata")
         st.json(metadata)
+
+        st.subheader("Runtime identity")
+        st.json(runtime_identity)
 
         st.subheader("Thresholds used for this run")
         st.json({
