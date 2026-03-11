@@ -74,14 +74,6 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-.helper-box {
-    background: rgba(255,255,255,0.03);
-    border-left: 4px solid #38bdf8;
-    border-radius: 10px;
-    padding: 12px 14px;
-    margin-top: 10px;
-    margin-bottom: 12px;
-}
 .small-muted {
     color: #94a3b8;
     font-size: 0.85rem;
@@ -93,8 +85,14 @@ st.markdown("""
 # --------------------------------------------------
 # Session state
 # --------------------------------------------------
-if "use_frozen_thresholds" not in st.session_state:
-    st.session_state.use_frozen_thresholds = True
+if "threshold_mode_frozen" not in st.session_state:
+    st.session_state.threshold_mode_frozen = True
+
+if "active_t_low" not in st.session_state:
+    st.session_state.active_t_low = None
+
+if "active_t_high" not in st.session_state:
+    st.session_state.active_t_high = None
 
 
 # --------------------------------------------------
@@ -108,12 +106,39 @@ def file_sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
     return h.hexdigest()
 
 
-def load_bundle(bundle_path: Path):
+@st.cache_resource
+def load_bundle_cached(bundle_path: str, bundle_sha: str):
     return joblib.load(bundle_path)
 
 
-def load_csv_from_path(path: Path) -> pd.DataFrame:
+@st.cache_data
+def load_csv_cached(path: str, file_sha: str) -> pd.DataFrame:
     return pd.read_csv(path)
+
+
+@st.cache_data
+def compute_default_pd_pack(bundle_path: str, bundle_sha: str, input_path: str, input_sha: str):
+    bundle = load_bundle_cached(bundle_path, bundle_sha)
+    model = bundle["model"]
+    df = load_csv_cached(input_path, input_sha)
+    pd_scores = model.predict_proba(df)[:, 1]
+    return {
+        "pd_scores": pd_scores,
+        "rows": len(df),
+    }
+
+
+@st.cache_data
+def build_scenario_grid_cached(pd_scores_tuple, loan_amnt_tuple):
+    pd_scores = np.array(pd_scores_tuple)
+    loan_amnt = np.array(loan_amnt_tuple)
+
+    base_scored_df = pd.DataFrame({
+        "pd_score": pd_scores,
+        "loan_amnt": loan_amnt,
+    })
+
+    return build_scenario_grid_from_scores(base_scored_df)
 
 
 def validate_upload_columns(df: pd.DataFrame):
@@ -122,8 +147,7 @@ def validate_upload_columns(df: pd.DataFrame):
     return missing_required, has_location
 
 
-def score_dataframe(model, raw_df: pd.DataFrame, t_low: float, t_high: float) -> pd.DataFrame:
-    pd_scores = model.predict_proba(raw_df)[:, 1]
+def apply_decisions_from_pd(raw_df: pd.DataFrame, pd_scores: np.ndarray, t_low: float, t_high: float) -> pd.DataFrame:
     decisions = assign_decision(pd_scores, t_low, t_high)
 
     loan_amnt = pd.to_numeric(
@@ -214,9 +238,9 @@ def apply_top_recommendation(recommendation_df: pd.DataFrame):
         return
 
     top = recommendation_df.iloc[0]
-    st.session_state.use_frozen_thresholds = False
-    st.session_state.t_low_slider = float(top["t_low"])
-    st.session_state.t_high_slider = float(top["t_high"])
+    st.session_state.threshold_mode_frozen = False
+    st.session_state.active_t_low = float(top["t_low"])
+    st.session_state.active_t_high = float(top["t_high"])
 
 
 def build_runtime_identity(bundle_path: Path, default_input_path: Path, metadata: dict) -> dict:
@@ -234,25 +258,23 @@ def build_runtime_identity(bundle_path: Path, default_input_path: Path, metadata
     }
 
 
-def compute_default_parity_summary(model, default_input_path: Path, thresholds: dict) -> dict:
-    df = pd.read_csv(default_input_path)
-    pd_scores = model.predict_proba(df)[:, 1]
-    decisions = assign_decision(pd_scores, thresholds["t_low"], thresholds["t_high"])
+def compute_default_parity_summary(default_pd_scores: np.ndarray, thresholds: dict) -> dict:
+    decisions = assign_decision(default_pd_scores, thresholds["t_low"], thresholds["t_high"])
     counts = pd.Series(decisions).value_counts()
 
     return {
-        "rows": int(len(df)),
-        "pd_mean": float(pd_scores.mean()),
-        "pd_std": float(pd_scores.std()),
+        "rows": int(len(default_pd_scores)),
+        "pd_mean": float(default_pd_scores.mean()),
+        "pd_std": float(default_pd_scores.std()),
         "approve": int(counts.get("approve", 0)),
         "review": int(counts.get("review", 0)),
         "reject": int(counts.get("reject", 0)),
-        "first_20_pd_scores": [float(x) for x in pd_scores[:20]],
+        "first_20_pd_scores": [float(x) for x in default_pd_scores[:20]],
     }
 
 
 # --------------------------------------------------
-# Load bundle
+# Load bundle and default data
 # --------------------------------------------------
 if not DEFAULT_BUNDLE_PATH.exists():
     st.error("Model bundle not found at artifacts/final_model_bundle.joblib")
@@ -262,8 +284,11 @@ if not DEFAULT_INPUT_PATH.exists():
     st.error("Default scoring dataset not found at data/scored/new_applications_to_score.csv")
     st.stop()
 
+bundle_sha = file_sha256(DEFAULT_BUNDLE_PATH)
+input_sha = file_sha256(DEFAULT_INPUT_PATH)
+
 try:
-    bundle = load_bundle(DEFAULT_BUNDLE_PATH)
+    bundle = load_bundle_cached(str(DEFAULT_BUNDLE_PATH), bundle_sha)
 except Exception as e:
     st.error(f"Failed to load model bundle: {e}")
     st.stop()
@@ -272,12 +297,25 @@ model = bundle["model"]
 frozen_thresholds = bundle["thresholds"]
 metadata = bundle["metadata"]
 
-runtime_identity = build_runtime_identity(DEFAULT_BUNDLE_PATH, DEFAULT_INPUT_PATH, metadata)
-default_parity_summary = compute_default_parity_summary(
-    model=model,
-    default_input_path=DEFAULT_INPUT_PATH,
-    thresholds=frozen_thresholds,
+default_df = load_csv_cached(str(DEFAULT_INPUT_PATH), input_sha)
+
+default_pd_pack = compute_default_pd_pack(
+    str(DEFAULT_BUNDLE_PATH),
+    bundle_sha,
+    str(DEFAULT_INPUT_PATH),
+    input_sha,
 )
+
+default_pd_scores = np.array(default_pd_pack["pd_scores"])
+default_loan_amnt = pd.to_numeric(default_df.get("loan_amnt", 0), errors="coerce").fillna(0.0).to_numpy()
+
+scenario_grid = build_scenario_grid_cached(
+    tuple(np.round(default_pd_scores, 12)),
+    tuple(np.round(default_loan_amnt, 2)),
+)
+
+runtime_identity = build_runtime_identity(DEFAULT_BUNDLE_PATH, DEFAULT_INPUT_PATH, metadata)
+default_parity_summary = compute_default_parity_summary(default_pd_scores, frozen_thresholds)
 
 # --------------------------------------------------
 # Title
@@ -287,10 +325,11 @@ st.caption("Local scoring prototype for calibrated PD-based approve / review / r
 st.caption(f"Build: {APP_BUILD}")
 
 # --------------------------------------------------
-# Assistant controls in sidebar
+# Sidebar assistant
 # --------------------------------------------------
 with st.sidebar:
     st.markdown("## 💡 Policy Assistant")
+    st.markdown('<div class="small-muted">Recommendations are based on the default scoring dataset so that policy scenarios stay consistent and comparable.</div>', unsafe_allow_html=True)
 
     goal = st.selectbox(
         "Preferred business goal",
@@ -316,21 +355,18 @@ with st.sidebar:
         help="Optional advisory AI explanation using Ollama's hosted API."
     )
 
+    def _get_secret(name: str, default: str = "") -> str:
+        try:
+            return st.secrets.get(name, default)
+        except Exception:
+            return default
+
     ollama_model_name = st.text_input(
         "Ollama model name",
-        value=st.secrets.get("OLLAMA_MODEL", "gpt-oss:120b"),
+        value=_get_secret("OLLAMA_MODEL", "gpt-oss:120b"),
         help="Hosted Ollama model name."
     )
 
-# Build scenario grid from default dataset scores
-base_scored_for_assistant = score_dataframe(
-    model=model,
-    raw_df=load_csv_from_path(DEFAULT_INPUT_PATH),
-    t_low=float(frozen_thresholds["t_low"]),
-    t_high=float(frozen_thresholds["t_high"]),
-)
-
-scenario_grid = build_scenario_grid_from_scores(base_scored_for_assistant)
 recommendation_df = recommend_thresholds(
     grid=scenario_grid,
     goal=goal,
@@ -402,41 +438,66 @@ left_col, right_col = st.columns([1.15, 0.85])
 with left_col:
     st.subheader("Threshold controls")
 
-    use_frozen_thresholds = st.checkbox(
-        "Use frozen engine thresholds",
-        value=st.session_state.use_frozen_thresholds,
-        key="use_frozen_thresholds"
-    )
-
     default_t_low = float(frozen_thresholds["t_low"])
     default_t_high = float(frozen_thresholds["t_high"])
 
-    if "t_low_slider" not in st.session_state:
-        st.session_state.t_low_slider = default_t_low
-    if "t_high_slider" not in st.session_state:
-        st.session_state.t_high_slider = default_t_high
+    if st.session_state.active_t_low is None:
+        st.session_state.active_t_low = default_t_low
+    if st.session_state.active_t_high is None:
+        st.session_state.active_t_high = default_t_high
 
-    t_low = st.slider(
-        "Auto-approve threshold (t_low)",
-        0.01, 0.40,
-        st.session_state.t_low_slider,
-        0.01,
-        key="t_low_slider",
-        disabled=use_frozen_thresholds
+    # --------------------------------------------------
+    # Checkbox OUTSIDE the form so enable/disable updates immediately
+    # --------------------------------------------------
+    use_frozen_thresholds = st.checkbox(
+        "Use frozen engine thresholds",
+        value=st.session_state.threshold_mode_frozen,
+        key="threshold_mode_checkbox"
     )
 
-    t_high = st.slider(
-        "Auto-reject threshold (t_high)",
-        0.05, 0.80,
-        st.session_state.t_high_slider,
-        0.01,
-        key="t_high_slider",
-        disabled=use_frozen_thresholds
-    )
+    # Keep session state in sync immediately
+    st.session_state.threshold_mode_frozen = use_frozen_thresholds
 
+    # --------------------------------------------------
+    # Form only for applying slider values
+    # --------------------------------------------------
+    with st.form("threshold_form", clear_on_submit=False):
+        draft_t_low = st.slider(
+            "Auto-approve threshold (t_low)",
+            0.01, 0.40,
+            float(default_t_low if use_frozen_thresholds else st.session_state.active_t_low),
+            0.01,
+            disabled=use_frozen_thresholds
+        )
+
+        draft_t_high = st.slider(
+            "Auto-reject threshold (t_high)",
+            0.05, 0.80,
+            float(default_t_high if use_frozen_thresholds else st.session_state.active_t_high),
+            0.01,
+            disabled=use_frozen_thresholds
+        )
+
+        threshold_submit = st.form_submit_button("Apply thresholds")
+
+    # --------------------------------------------------
+    # Apply values only when the form is submitted
+    # --------------------------------------------------
+    if threshold_submit:
+        if use_frozen_thresholds:
+            st.session_state.active_t_low = default_t_low
+            st.session_state.active_t_high = default_t_high
+        else:
+            st.session_state.active_t_low = draft_t_low
+            st.session_state.active_t_high = draft_t_high
+
+    # Values used for actual execution
     if use_frozen_thresholds:
         t_low = default_t_low
         t_high = default_t_high
+    else:
+        t_low = st.session_state.active_t_low
+        t_high = st.session_state.active_t_high
 
     if t_high <= t_low:
         st.error("t_high must be greater than t_low.")
@@ -444,18 +505,22 @@ with left_col:
 
     st.markdown(
         f"""
-**Current policy**
-- Auto-approve if PD < **{t_low:.2f}**
-- Review if **{t_low:.2f} ≤ PD < {t_high:.2f}**
-- Reject if PD ≥ **{t_high:.2f}**
-"""
-    )
+    **Current policy**
+    - Auto-approve if PD < **{t_low:.2f}**
+    - Review if **{t_low:.2f} ≤ PD < {t_high:.2f}**
+    - Reject if PD ≥ **{t_high:.2f}**
+    """
+        )
 
 with right_col:
     st.subheader("Current engine state")
     st.metric("Frozen t_low", f"{default_t_low:.2f}")
     st.metric("Frozen t_high", f"{default_t_high:.2f}")
-    st.markdown('<div class="small-muted">The sidebar assistant suggests policy scenarios. The sliders here control the actual execution thresholds for this run.</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="small-muted">The sidebar assistant suggests policy scenarios. '
+        'The threshold form controls the actual execution thresholds for this run.</div>',
+        unsafe_allow_html=True
+    )
 
 # --------------------------------------------------
 # Input dataset
@@ -502,7 +567,8 @@ The uploaded file should contain one row per applicant.
 """)
 
     if TEMPLATE_PATH.exists():
-        template_df = load_csv_from_path(TEMPLATE_PATH)
+        template_sha = file_sha256(TEMPLATE_PATH)
+        template_df = load_csv_cached(str(TEMPLATE_PATH), template_sha)
         st.dataframe(template_df, use_container_width=True)
         st.download_button(
             "Download upload template CSV",
@@ -536,7 +602,7 @@ if uploaded_file is not None:
         )
 
 elif use_default_dataset:
-    input_df = load_csv_from_path(DEFAULT_INPUT_PATH)
+    input_df = default_df
     input_name = str(DEFAULT_INPUT_PATH)
 else:
     st.info("Upload a file or enable the default dataset.")
@@ -548,18 +614,37 @@ else:
 run_button = st.button("Execute underwriting engine", type="primary")
 
 if run_button:
-    scored_df = score_dataframe(model, input_df, t_low=t_low, t_high=t_high)
-    summary = build_summary(scored_df)
+    if uploaded_file is None and use_default_dataset:
+        scored_df = apply_decisions_from_pd(
+            raw_df=default_df,
+            pd_scores=default_pd_scores,
+            t_low=t_low,
+            t_high=t_high,
+        )
+    else:
+        uploaded_pd_scores = model.predict_proba(input_df)[:, 1]
+        scored_df = apply_decisions_from_pd(
+            raw_df=input_df,
+            pd_scores=uploaded_pd_scores,
+            t_low=t_low,
+            t_high=t_high,
+        )
 
-    st.success("Scoring completed successfully.")
-
-    st.json({
+    st.session_state.scored_df = scored_df
+    st.session_state.last_run_info = {
         "input_name": input_name,
         "rows_scored": len(input_df),
         "t_low_used": t_low,
         "t_high_used": t_high,
-        "use_frozen_thresholds": use_frozen_thresholds,
-    })
+        "use_frozen_thresholds": st.session_state.threshold_mode_frozen,
+    }
+
+if "scored_df" in st.session_state:
+    scored_df = st.session_state.scored_df
+    summary = build_summary(scored_df)
+
+    st.success("Scoring completed successfully.")
+    st.json(st.session_state.last_run_info)
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Applicants", f"{summary['total_applicants']:,}")
@@ -628,21 +713,22 @@ if run_button:
         st.subheader("Engine metadata")
         st.json(metadata)
 
-        st.subheader("Runtime identity")
-        st.json(runtime_identity)
+        with st.expander("Debug / parity diagnostics", expanded=False):
+            st.subheader("Runtime identity")
+            st.json(runtime_identity)
 
-        st.subheader("Default parity summary")
-        st.json(default_parity_summary)
+            st.subheader("Default parity summary")
+            st.json(default_parity_summary)
+
+            st.subheader("App build")
+            st.code(APP_BUILD)
 
         st.subheader("Thresholds used for this run")
         st.json({
-            "input_dataset": input_name,
-            "t_low_used": t_low,
-            "t_high_used": t_high,
+            "input_dataset": st.session_state.last_run_info["input_name"],
+            "t_low_used": st.session_state.last_run_info["t_low_used"],
+            "t_high_used": st.session_state.last_run_info["t_high_used"],
         })
-
-        st.subheader("App build")
-        st.code(APP_BUILD)
 
     with tab4:
         st.subheader("Download outputs")
@@ -662,4 +748,3 @@ if run_button:
             file_name="scoring_summary.json",
             mime="application/json"
         )
-        
