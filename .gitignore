@@ -6,3 +6,4 @@ __pycache__/
 .DS_Store
 Thumbs.db
 data/scored/scored_decisions.csv
+.streamlit/secrets.toml

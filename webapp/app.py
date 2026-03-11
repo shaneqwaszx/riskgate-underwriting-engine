@@ -125,57 +125,7 @@ st.markdown("""
     margin-bottom: 12px;
 }
 
-/* Floating assistant launcher */
-div.st-key-assistant_launcher {
-    position: fixed;
-    right: 24px;
-    bottom: 24px;
-    width: 220px;
-    z-index: 999999;
-}
-div.st-key-assistant_launcher button {
-    width: 100%;
-    border-radius: 999px;
-    background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
-    color: white;
-    border: none;
-    box-shadow: 0 10px 25px rgba(37,99,235,0.35);
-    font-weight: 700;
-}
 
-/* Floating drawer */
-div.st-key-assistant_drawer {
-    position: fixed;
-    right: 24px;
-    bottom: 88px;
-    width: 430px;
-    max-height: 72vh;
-    overflow-y: auto;
-    z-index: 999998;
-    background: linear-gradient(180deg, #0f172a 0%, #111827 100%);
-    border: 1px solid rgba(148, 163, 184, 0.22);
-    border-radius: 18px;
-    padding: 16px 16px 8px 16px;
-    box-shadow: 0 18px 45px rgba(0, 0, 0, 0.35);
-}
-
-/* Nice section inside drawer */
-.assistant-section {
-    background: rgba(255,255,255,0.035);
-    border: 1px solid rgba(255,255,255,0.06);
-    border-radius: 12px;
-    padding: 12px 14px;
-    margin-bottom: 12px;
-}
-.assistant-section h4 {
-    margin: 0 0 8px 0;
-    color: #93c5fd;
-    font-size: 0.95rem;
-}
-.assistant-muted {
-    color: #cbd5e1;
-    font-size: 0.88rem;
-}
 </style>
 """, unsafe_allow_html=True)
 
@@ -267,6 +217,8 @@ def build_summary(scored_df: pd.DataFrame) -> dict:
         ),
     }
     return summary
+
+from textwrap import dedent
 
 def render_recommendation_card(goal: str, recommendation_df: pd.DataFrame):
     if recommendation_df.empty:
@@ -401,6 +353,55 @@ def render_policy_assistant_drawer(goal: str, recommendation_df: pd.DataFrame, s
                 unsafe_allow_html=True
             )
 
+def render_policy_assistant_sidebar(goal: str, recommendation_df: pd.DataFrame, scenario_grid: pd.DataFrame, ai_text: str | None = None):
+    with st.sidebar:
+        st.markdown("## 💡 Policy Assistant")
+
+        if not recommendation_df.empty:
+            render_recommendation_card(goal, recommendation_df)
+
+            if st.button("Apply recommended thresholds", use_container_width=True):
+                apply_top_recommendation(recommendation_df)
+                st.rerun()
+        else:
+            st.warning("No feasible threshold recommendation is available for the current constraints.")
+
+        with st.expander("Explain the business goals", expanded=True):
+            st.markdown("""
+            **Balanced**  
+            Tries to maintain a healthy approval rate while penalizing excessive retained risk and avoiding review overload.
+
+            **Growth**  
+            Favours higher approvals and conversion, while still applying a lighter penalty to retained risk.
+
+            **Conservative**  
+            Prioritizes lower retained risk in the non-rejected pool, even if approval volume falls.
+
+            **Operations-first**  
+            Prioritizes a smaller review queue so the underwriting team can manage workload more easily.
+            """)
+
+        with st.expander("How the assistant derives recommendations", expanded=False):
+            st.markdown("""
+            The assistant evaluates many threshold pairs (`t_low`, `t_high`) and estimates their impact on:
+            - approval rate
+            - review rate
+            - reject rate
+            - average PD in each decision bucket
+            - retained risk proxy in the non-rejected population
+
+            It then ranks threshold pairs according to the selected business goal and the operational constraints set on the page.
+            """)
+
+        with st.expander("Top threshold scenarios", expanded=False):
+            st.dataframe(recommendation_df, use_container_width=True, height=220)
+
+        if ai_text:
+            st.markdown(
+                f'<div class="helper-box"><b>AI explanation:</b><br>{ai_text}</div>',
+                unsafe_allow_html=True
+            )
+            
 # --------------------------------------------------
 # Load engine bundle
 # --------------------------------------------------
@@ -660,8 +661,7 @@ Provide a short practical recommendation in plain English.
 """
     ai_text = ollama_explanation(prompt, model_name=ollama_model_name)
 
-st.button("💡 Policy Assistant", key="assistant_launcher", on_click=open_assistant)
-render_policy_assistant_drawer(goal, recommendation_df, scenario_grid, ai_text=ai_text)
+render_policy_assistant_sidebar(goal, recommendation_df, scenario_grid, ai_text=ai_text)
 
 # --------------------------------------------------
 # Execute engine

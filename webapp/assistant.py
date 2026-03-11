@@ -146,20 +146,41 @@ def rule_based_advice(goal: str, recommendation_df: pd.DataFrame) -> str:
     )
 
 
-def ollama_explanation(prompt: str, model_name: str = "llama3.1:8b", host: str = "http://localhost:11434") -> str:
+def ollama_explanation(prompt: str, model_name: str | None = None, host: str | None = None, api_key: str | None = None) -> str:
     """
-    Optional local AI explanation using Ollama.
-    Requires a running Ollama server.
+    Remote Ollama Cloud explanation using ollama.com API.
     """
     try:
+        import streamlit as st
+
+        resolved_host = host or st.secrets.get("OLLAMA_BASE_URL", "https://ollama.com/api")
+        resolved_api_key = api_key or st.secrets.get("OLLAMA_API_KEY", "")
+        resolved_model = model_name or st.secrets.get("OLLAMA_MODEL", "gpt-oss:120b")
+
+        if not resolved_api_key:
+            return "Ollama API key is not configured in Streamlit secrets."
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {resolved_api_key}",
+        }
+
         payload = {
-            "model": model_name,
+            "model": resolved_model,
             "prompt": prompt,
             "stream": False,
         }
-        response = requests.post(f"{host}/api/generate", json=payload, timeout=60)
+
+        response = requests.post(
+            f"{resolved_host.rstrip('/')}/generate",
+            json=payload,
+            headers=headers,
+            timeout=90,
+        )
         response.raise_for_status()
+
         data = response.json()
         return data.get("response", "").strip()
+
     except Exception as e:
         return f"Ollama explanation unavailable: {e}"
