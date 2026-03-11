@@ -9,6 +9,7 @@ from pathlib import Path
 
 import inspect
 import riskgate.features as rg_features
+import riskgate.config as rg_config
 
 # --------------------------------------------------
 # Make project root importable before joblib unpickles
@@ -447,6 +448,53 @@ def text_sha256(text: str) -> str:
     import hashlib
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
+def json_sha256(obj) -> str:
+    import json
+    return text_sha256(json.dumps(obj, sort_keys=True))
+
+def dataframe_sha256(df: pd.DataFrame) -> str:
+    return text_sha256(df.to_csv(index=False))
+
+
+def array_sha256(arr: np.ndarray) -> str:
+    rounded = np.round(np.asarray(arr), decimals=10)
+    return hashlib.sha256(rounded.tobytes()).hexdigest()
+
+
+def get_pipeline_debug(bundle, input_df: pd.DataFrame, n: int = 5) -> dict:
+    model = bundle["model"]
+
+    estimator = None
+    if hasattr(model, "estimator"):
+        estimator = model.estimator
+    elif hasattr(model, "base_estimator"):
+        estimator = model.base_estimator
+
+    if estimator is None:
+        return {"error": "Could not access wrapped estimator."}
+
+    features_step = estimator.named_steps["features"]
+    preprocessor = estimator.named_steps["preprocessor"]
+
+    sample_raw = input_df.head(n).copy()
+    sample_features = features_step.transform(sample_raw).copy()
+    sample_preprocessed = preprocessor.transform(sample_features)
+
+    if hasattr(sample_preprocessed, "toarray"):
+        pre_arr = sample_preprocessed.toarray()
+    else:
+        pre_arr = np.asarray(sample_preprocessed)
+
+    return {
+        "sample_rows": n,
+        "feature_df_sha256": dataframe_sha256(sample_features),
+        "feature_df_columns": sample_features.columns.tolist(),
+        "feature_df_sample": sample_features.to_dict(orient="records"),
+        "preprocessed_shape": list(pre_arr.shape),
+        "preprocessed_sha256": array_sha256(pre_arr),
+        "preprocessed_first_row_first_20": pre_arr[0, :20].tolist() if len(pre_arr) > 0 else [],
+    }
+
 # --------------------------------------------------
 # Load engine bundle
 # --------------------------------------------------
@@ -467,6 +515,7 @@ default_parity_summary = compute_default_parity_summary(
 )
 
 runtime_identity = build_runtime_identity(DEFAULT_BUNDLE_PATH, DEFAULT_INPUT_PATH, metadata, model)
+pipeline_debug = get_pipeline_debug(bundle, pd.read_csv(DEFAULT_INPUT_PATH), n=5)
 
 import inspect
 import riskgate.features as rg_features
@@ -481,12 +530,24 @@ code_identity = {
     "features_module_path": str(Path(rg_features.__file__).resolve()),
     "features_module_file_sha256": file_sha256(Path(rg_features.__file__).resolve()),
     "loan_feature_builder_source_sha256": safe_source_hash(rg_features.LoanFeatureBuilder),
+    "_safe_to_numeric_sha256": safe_source_hash(rg_features._safe_to_numeric),
     "_safe_to_datetime_sha256": safe_source_hash(rg_features._safe_to_datetime),
     "_month_diff_sha256": safe_source_hash(rg_features._month_diff),
     "_extract_zip_code_sha256": safe_source_hash(rg_features._extract_zip_code),
     "_extract_state_sha256": safe_source_hash(rg_features._extract_state),
     "_parse_term_months_sha256": safe_source_hash(rg_features._parse_term_months),
     "_parse_emp_length_years_sha256": safe_source_hash(rg_features._parse_emp_length_years),
+}
+
+config_identity = {
+    "config_module_path": str(Path(rg_config.__file__).resolve()),
+    "config_module_file_sha256": file_sha256(Path(rg_config.__file__).resolve()),
+    "numeric_features_sha256": json_sha256(rg_config.NUMERIC_FEATURES),
+    "categorical_features_sha256": json_sha256(rg_config.CATEGORICAL_FEATURES),
+    "raw_columns_needed_sha256": json_sha256(rg_config.RAW_COLUMNS_NEEDED),
+    "numeric_features_count": len(rg_config.NUMERIC_FEATURES),
+    "categorical_features_count": len(rg_config.CATEGORICAL_FEATURES),
+    "raw_columns_needed_count": len(rg_config.RAW_COLUMNS_NEEDED),
 }
 
 st.title("RiskGate: Automated Underwriting Policy Engine")
@@ -858,6 +919,12 @@ if run_button:
 
         st.subheader("Code identity")
         st.json(code_identity)
+
+        st.subheader("Config identity")
+        st.json(config_identity)
+
+        st.subheader("Pipeline debug")
+        st.json(pipeline_debug)
 
     with tab4:
         st.subheader("Download outputs")
