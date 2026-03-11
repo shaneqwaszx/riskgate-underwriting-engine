@@ -1,7 +1,10 @@
+APP_BUILD = "2026-03-11-local-parity-v1"
+
 from textwrap import dedent
 
 import sys
 import hashlib
+import platform
 from pathlib import Path
 
 # --------------------------------------------------
@@ -13,9 +16,12 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import json
 import joblib
+import sklearn
+import xgboost
 import numpy as np
 import pandas as pd
 import plotly.express as px
+
 import streamlit as st
 
 from webapp.assistant import (
@@ -106,19 +112,21 @@ def file_sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
             h.update(chunk)
     return h.hexdigest()
 
-@st.cache_resource
+
 def load_bundle(bundle_path: str, bundle_mtime: float):
     return joblib.load(bundle_path)
 
 
-@st.cache_data
+
 def load_csv_from_path(path: str, file_mtime: float):
     return pd.read_csv(path)
 
 
-@st.cache_data
+
 def load_upload_template(path: str, file_mtime: float):
     return pd.read_csv(path)
+
+
 
 def score_dataframe(model, raw_df: pd.DataFrame, t_low: float, t_high: float) -> pd.DataFrame:
     pd_scores = model.predict_proba(raw_df)[:, 1]
@@ -387,8 +395,15 @@ def render_recommendation_panel(goal: str, recommendation_df: pd.DataFrame):
     col3.metric("Reject rate", f"{top['reject_rate']:.1%}")
     col4.metric("Risk proxy", f"{top['risk_proxy_nonreject']:,.0f}")
 
-def build_runtime_identity(bundle_path: Path, default_input_path: Path, metadata: dict) -> dict:
+def fingerprint_predictions(pd_scores: np.ndarray, decimals: int = 10) -> str:
+    rounded = np.round(pd_scores, decimals=decimals)
+    return hashlib.sha256(rounded.tobytes()).hexdigest()
+
+def build_runtime_identity(bundle_path: Path, default_input_path: Path, metadata: dict, model) -> dict:
     identity = {
+        "python_version": platform.python_version(),
+        "sklearn_version": sklearn.__version__,
+        "xgboost_version": xgboost.__version__,
         "bundle_path": str(bundle_path),
         "bundle_sha256": file_sha256(bundle_path) if bundle_path.exists() else "missing",
         "bundle_created_at": metadata.get("created_at_utc"),
@@ -397,7 +412,33 @@ def build_runtime_identity(bundle_path: Path, default_input_path: Path, metadata
         "default_input_path": str(default_input_path),
         "default_input_sha256": file_sha256(default_input_path) if default_input_path.exists() else "missing",
     }
+
+    if default_input_path.exists():
+        df = pd.read_csv(default_input_path)
+        pd_scores = model.predict_proba(df)[:, 1]
+        first_n = min(1000, len(pd_scores))
+        identity["default_input_rows"] = int(len(df))
+        identity["pd_mean"] = float(pd_scores.mean())
+        identity["pd_std"] = float(pd_scores.std())
+        identity["first_1000_prediction_fingerprint"] = fingerprint_predictions(pd_scores[:first_n])
+
     return identity
+
+def compute_default_parity_summary(model, default_input_path: Path, thresholds: dict) -> dict:
+    df = pd.read_csv(default_input_path)
+    pd_scores = model.predict_proba(df)[:, 1]
+    decisions = assign_decision(pd_scores, thresholds["t_low"], thresholds["t_high"])
+    counts = pd.Series(decisions).value_counts()
+
+    return {
+        "rows": int(len(df)),
+        "pd_mean": float(pd_scores.mean()),
+        "pd_std": float(pd_scores.std()),
+        "approve": int(counts.get("approve", 0)),
+        "review": int(counts.get("review", 0)),
+        "reject": int(counts.get("reject", 0)),
+        "first_20_pd_scores": [float(x) for x in pd_scores[:20]],
+    }
 
 # --------------------------------------------------
 # Load engine bundle
@@ -412,10 +453,17 @@ model = bundle["model"]
 frozen_thresholds = bundle["thresholds"]
 metadata = bundle["metadata"]
 
-runtime_identity = build_runtime_identity(DEFAULT_BUNDLE_PATH, DEFAULT_INPUT_PATH, metadata)
+default_parity_summary = compute_default_parity_summary(
+    model=model,
+    default_input_path=DEFAULT_INPUT_PATH,
+    thresholds=frozen_thresholds
+)
+
+runtime_identity = build_runtime_identity(DEFAULT_BUNDLE_PATH, DEFAULT_INPUT_PATH, metadata, model)
 
 st.title("RiskGate: Automated Underwriting Policy Engine")
 st.caption("Local scoring prototype for calibrated PD-based approve / review / reject decisioning")
+st.caption(f"Build: {APP_BUILD}")
 
 # --------------------------------------------------
 # Controls
@@ -680,6 +728,15 @@ if run_button:
 
     st.success("Scoring completed successfully.")
 
+    st.write("Debug execution inputs")
+    st.json({
+        "input_name": input_name,
+        "rows_scored": len(input_df),
+        "t_low_used": t_low,
+        "t_high_used": t_high,
+        "use_frozen_thresholds": use_frozen_thresholds,
+    })
+
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Applicants", f"{summary['total_applicants']:,}")
     k2.metric("Approve", f"{summary['approve_n']:,}", f"{summary['approve_rate']:.1%}")
@@ -764,6 +821,12 @@ if run_button:
             "input_rows": len(input_df),
             "thresholds_in_bundle": frozen_thresholds,
         })
+
+        st.subheader("Default parity summary")
+        st.json(default_parity_summary)
+
+        st.subheader("App build")
+        st.code(APP_BUILD)
 
     with tab4:
         st.subheader("Download outputs")
