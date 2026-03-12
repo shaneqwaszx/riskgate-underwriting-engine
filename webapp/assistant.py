@@ -85,6 +85,8 @@ def recommend_thresholds(
 ) -> pd.DataFrame:
     """
     Deterministic recommendation engine.
+    Targets act as both hard feasibility filters (when possible)
+    and soft preferences through proximity scoring.
     """
     if grid.empty:
         return grid
@@ -94,39 +96,133 @@ def recommend_thresholds(
         (grid["approve_rate"] >= min_approve_rate)
     ].copy()
 
+    used_fallback = False
     if feasible.empty:
         feasible = grid.copy()
+        used_fallback = True
+
+    # Constraint-gap diagnostics
+    feasible["review_excess"] = np.maximum(0, feasible["review_rate"] - max_review_rate)
+    feasible["approve_shortfall"] = np.maximum(0, min_approve_rate - feasible["approve_rate"])
+    feasible["constraint_penalty"] = feasible["review_excess"] + feasible["approve_shortfall"]
+
+    # Soft preference: among feasible candidates, prefer ones near the stated targets
+    feasible["review_proximity"] = -np.abs(feasible["review_rate"] - max_review_rate)
+    feasible["approve_proximity"] = -np.abs(feasible["approve_rate"] - min_approve_rate)
 
     if goal == "Balanced":
         feasible["score"] = (
             feasible["approve_rate"]
             - 0.50 * feasible["risk_proxy_norm"]
-            - 0.20 * np.abs(feasible["review_rate"] - max_review_rate * 0.8)
+            + 0.20 * feasible["review_proximity"]
+            + 0.15 * feasible["approve_proximity"]
+            - 2.00 * feasible["constraint_penalty"]
         )
-        feasible = feasible.sort_values("score", ascending=False)
 
     elif goal == "Growth":
-        feasible["score"] = feasible["approve_rate"] - 0.25 * feasible["risk_proxy_norm"]
-        feasible = feasible.sort_values(["score", "approve_rate"], ascending=[False, False])
+        feasible["score"] = (
+            1.20 * feasible["approve_rate"]
+            - 0.25 * feasible["risk_proxy_norm"]
+            + 0.10 * feasible["review_proximity"]
+            + 0.20 * feasible["approve_proximity"]
+            - 2.00 * feasible["constraint_penalty"]
+        )
 
     elif goal == "Conservative":
-        feasible["score"] = -feasible["risk_proxy_norm"] + 0.10 * feasible["approve_rate"]
-        feasible = feasible.sort_values("score", ascending=False)
+        feasible["score"] = (
+            -1.10 * feasible["risk_proxy_norm"]
+            + 0.10 * feasible["approve_rate"]
+            + 0.10 * feasible["review_proximity"]
+            + 0.10 * feasible["approve_proximity"]
+            - 2.00 * feasible["constraint_penalty"]
+        )
 
     elif goal == "Operations-first":
         feasible["score"] = (
-            -feasible["review_rate"]
+            -1.20 * feasible["review_rate"]
             + 0.20 * feasible["approve_rate"]
             - 0.20 * feasible["risk_proxy_norm"]
+            + 0.20 * feasible["review_proximity"]
+            + 0.10 * feasible["approve_proximity"]
+            - 2.00 * feasible["constraint_penalty"]
         )
-        feasible = feasible.sort_values("score", ascending=False)
 
     else:
-        feasible["score"] = feasible["approve_rate"] - 0.50 * feasible["risk_proxy_norm"]
-        feasible = feasible.sort_values("score", ascending=False)
+        feasible["score"] = (
+            feasible["approve_rate"]
+            - 0.50 * feasible["risk_proxy_norm"]
+            + 0.20 * feasible["review_proximity"]
+            + 0.15 * feasible["approve_proximity"]
+            - 2.00 * feasible["constraint_penalty"]
+        )
 
-    return feasible.head(5)
+    feasible["used_fallback"] = used_fallback
 
+    return feasible.sort_values(
+        ["constraint_penalty", "score"],
+        ascending=[True, False]
+    ).head(5)
+
+def diagnose_assistant_constraints(
+    grid: pd.DataFrame,
+    recommendation_df: pd.DataFrame,
+    max_review_rate: float,
+    min_approve_rate: float
+) -> dict:
+    if grid.empty:
+        return {
+            "feasible_count": 0,
+            "review_target_binding": None,
+            "approve_target_binding": None,
+            "message": "No scenario grid available."
+        }
+
+    feasible = grid[
+        (grid["review_rate"] <= max_review_rate) &
+        (grid["approve_rate"] >= min_approve_rate)
+    ].copy()
+
+    if recommendation_df.empty:
+        return {
+            "feasible_count": int(len(feasible)),
+            "review_target_binding": None,
+            "approve_target_binding": None,
+            "message": "No recommendation could be generated."
+        }
+
+    top = recommendation_df.iloc[0]
+
+    review_gap = float(max_review_rate - top["review_rate"])
+    approve_gap = float(top["approve_rate"] - min_approve_rate)
+
+    review_binding = review_gap < 0.03
+    approve_binding = approve_gap < 0.03
+
+    if len(feasible) == 0:
+        msg = (
+            "No candidate threshold pair satisfies both targets exactly. "
+            "The assistant is showing the closest available option."
+        )
+    else:
+        parts = [f"{len(feasible)} scenario(s) satisfy your current targets."]
+        if review_binding:
+            parts.append("The review-rate target is binding or close to binding.")
+        else:
+            parts.append("The review-rate target is not currently binding.")
+        if approve_binding:
+            parts.append("The minimum approve-rate target is binding or close to binding.")
+        else:
+            parts.append("The minimum approve-rate target is not currently binding.")
+        msg = " ".join(parts)
+
+    return {
+        "feasible_count": int(len(feasible)),
+        "review_target_binding": review_binding,
+        "approve_target_binding": approve_binding,
+        "review_gap": review_gap,
+        "approve_gap": approve_gap,
+        "message": msg,
+    }
 
 def _get_secret(name: str, default: str = "") -> str:
     try:

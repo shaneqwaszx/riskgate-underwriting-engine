@@ -24,6 +24,7 @@ from webapp.assistant import (
     assign_decision,
     build_scenario_grid_from_scores,
     recommend_thresholds,
+    diagnose_assistant_constraints,
     ollama_explanation,
 )
 
@@ -219,6 +220,39 @@ def build_summary(scored_df: pd.DataFrame) -> dict:
         ),
     }
 
+def build_execution_explainer_prompt(summary: dict, run_info: dict) -> str:
+    return f"""
+    You are an underwriting analytics assistant.
+
+    Interpret the following execution outcome for a probability-of-default underwriting engine.
+
+    Execution thresholds:
+    - t_low = {run_info['t_low_used']:.2f}
+    - t_high = {run_info['t_high_used']:.2f}
+    - input dataset = {run_info['input_name']}
+    - rows scored = {run_info['rows_scored']}
+
+    Execution result:
+    - approve count = {summary['approve_n']}
+    - review count = {summary['review_n']}
+    - reject count = {summary['reject_n']}
+    - approve rate = {summary['approve_rate']:.3f}
+    - review rate = {summary['review_rate']:.3f}
+    - reject rate = {summary['reject_rate']:.3f}
+    - average PD overall = {summary['avg_pd_overall']:.4f}
+    - average PD approve = {summary['avg_pd_approve']:.4f if pd.notna(summary['avg_pd_approve']) else 'NA'}
+    - average PD review = {summary['avg_pd_review']:.4f if pd.notna(summary['avg_pd_review']) else 'NA'}
+    - average PD reject = {summary['avg_pd_reject']:.4f if pd.notna(summary['avg_pd_reject']) else 'NA'}
+    - non-rejected risk proxy = {summary['risk_proxy_nonreject']:.2f}
+
+    Write a concise but useful explanation in plain English covering:
+    1. what this execution means,
+    2. the likely business benefits,
+    3. the likely operational or risk trade-offs,
+    4. one or two possible next adjustments to consider.
+
+    Do not make legal or regulatory claims. Keep it advisory and practical.
+    """.strip()
 
 def render_recommendation_panel(goal: str, recommendation_df: pd.DataFrame):
     if recommendation_df.empty:
@@ -416,6 +450,13 @@ recommendation_df = recommend_thresholds(
     min_approve_rate=min_approve_rate,
 )
 
+assistant_diag = diagnose_assistant_constraints(
+    grid=scenario_grid,
+    recommendation_df=recommendation_df,
+    max_review_rate=max_review_rate,
+    min_approve_rate=min_approve_rate,
+)
+
 ai_text = None
 if use_ollama:
     prompt = f"""
@@ -433,7 +474,13 @@ Provide a short practical recommendation in plain English.
 
 with st.sidebar:
     with st.container(border=True):
-        render_recommendation_panel(goal, recommendation_df)
+        st.caption("ASSISTANT DIAGNOSTICS")
+        st.write(assistant_diag["message"])
+
+        if assistant_diag["review_target_binding"] is not None:
+            c1, c2 = st.columns(2)
+            c1.metric("Review target gap", f"{assistant_diag['review_gap']:.1%}")
+            c2.metric("Approve target gap", f"{assistant_diag['approve_gap']:.1%}")
 
     if st.button("Apply recommended thresholds", use_container_width=True):
         apply_top_recommendation(recommendation_df)
@@ -674,6 +721,11 @@ if "scored_df" in st.session_state:
     scored_df = st.session_state.scored_df
     summary = build_summary(scored_df)
 
+    execution_ai_text = None
+    if use_ollama:
+        execution_prompt = build_execution_explainer_prompt(summary, st.session_state.last_run_info)
+        execution_ai_text = ollama_explanation(execution_prompt, model_name=ollama_model_name)
+
     st.success("Scoring completed successfully.")
     st.json(st.session_state.last_run_info)
 
@@ -705,6 +757,10 @@ if "scored_df" in st.session_state:
             title="PD score distribution by decision"
         )
         st.plotly_chart(fig_hist, use_container_width=True)
+
+    if execution_ai_text:
+        with st.expander("AI explanation of this execution", expanded=False):
+            st.write(execution_ai_text)
 
     tab1, tab2, tab3, tab4 = st.tabs([
         "Applicant report",
