@@ -18,14 +18,16 @@ def build_scenario_grid_from_scores(
     min_band_width: float = 0.05
 ) -> pd.DataFrame:
     """
-    Build a scenario table using already generated PD scores.
-    This lets the website recommend threshold pairs without rescoring the model repeatedly.
+    Build a scenario table using already-generated PD scores.
+    Requires columns:
+    - pd_score
+    - loan_amnt
     """
     if t_low_values is None:
-        t_low_values = np.round(np.arange(0.05, 0.21, 0.01), 2)
+        t_low_values = np.round(np.arange(0.05, 0.21, 0.02), 2)
 
     if t_high_values is None:
-        t_high_values = np.round(np.arange(0.15, 0.41, 0.01), 2)
+        t_high_values = np.round(np.arange(0.15, 0.41, 0.02), 2)
 
     pd_scores = base_scored_df["pd_score"].to_numpy()
     loan_amnt = pd.to_numeric(
@@ -82,8 +84,7 @@ def recommend_thresholds(
     min_approve_rate: float
 ) -> pd.DataFrame:
     """
-    Rule-based threshold recommendation engine.
-    This is deterministic and academically easier to defend than LLM-only suggestions.
+    Deterministic recommendation engine.
     """
     if grid.empty:
         return grid
@@ -127,35 +128,23 @@ def recommend_thresholds(
     return feasible.head(5)
 
 
-def rule_based_advice(goal: str, recommendation_df: pd.DataFrame) -> str:
-    if recommendation_df.empty:
-        return (
-            "No feasible threshold pair met the requested constraints. "
-            "Loosen the review cap or reduce the minimum approve rate."
-        )
-
-    top = recommendation_df.iloc[0]
-
-    return (
-        f"Suggested threshold pair for {goal}: "
-        f"t_low={top['t_low']:.2f}, t_high={top['t_high']:.2f}. "
-        f"Estimated approve rate={top['approve_rate']:.1%}, "
-        f"review rate={top['review_rate']:.1%}, "
-        f"reject rate={top['reject_rate']:.1%}, "
-        f"non-rejected risk proxy={top['risk_proxy_nonreject']:,.0f}."
-    )
+def _get_secret(name: str, default: str = "") -> str:
+    try:
+        import streamlit as st
+        return st.secrets.get(name, default)
+    except Exception:
+        return default
 
 
 def ollama_explanation(prompt: str, model_name: str | None = None, host: str | None = None, api_key: str | None = None) -> str:
     """
-    Remote Ollama Cloud explanation using ollama.com API.
+    Hosted Ollama Cloud explanation using ollama.com API.
+    This is advisory only.
     """
     try:
-        import streamlit as st
-
-        resolved_host = host or st.secrets.get("OLLAMA_BASE_URL", "https://ollama.com/api")
-        resolved_api_key = api_key or st.secrets.get("OLLAMA_API_KEY", "")
-        resolved_model = model_name or st.secrets.get("OLLAMA_MODEL", "gpt-oss:120b")
+        resolved_host = host or _get_secret("OLLAMA_BASE_URL", "https://ollama.com/api")
+        resolved_api_key = api_key or _get_secret("OLLAMA_API_KEY", "")
+        resolved_model = model_name or _get_secret("OLLAMA_MODEL", "gpt-oss:120b")
 
         if not resolved_api_key:
             return "Ollama API key is not configured in Streamlit secrets."
@@ -178,7 +167,6 @@ def ollama_explanation(prompt: str, model_name: str | None = None, host: str | N
             timeout=90,
         )
         response.raise_for_status()
-
         data = response.json()
         return data.get("response", "").strip()
 

@@ -98,6 +98,11 @@ if "active_t_high" not in st.session_state:
 # --------------------------------------------------
 # Helpers
 # --------------------------------------------------
+def file_signature(path: Path):
+    stat = path.stat()
+    return (str(path), stat.st_size, stat.st_mtime_ns)
+
+
 def file_sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -107,20 +112,20 @@ def file_sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
 
 
 @st.cache_resource
-def load_bundle_cached(bundle_path: str, bundle_sha: str):
+def load_bundle_cached(bundle_path: str, bundle_sig: tuple):
     return joblib.load(bundle_path)
 
 
 @st.cache_data
-def load_csv_cached(path: str, file_sha: str) -> pd.DataFrame:
+def load_csv_cached(path: str, file_sig: tuple) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
 @st.cache_data
-def compute_default_pd_pack(bundle_path: str, bundle_sha: str, input_path: str, input_sha: str):
-    bundle = load_bundle_cached(bundle_path, bundle_sha)
+def compute_default_pd_pack(bundle_path: str, bundle_sig: tuple, input_path: str, input_sig: tuple):
+    bundle = load_bundle_cached(bundle_path, bundle_sig)
     model = bundle["model"]
-    df = load_csv_cached(input_path, input_sha)
+    df = load_csv_cached(input_path, input_sig)
     pd_scores = model.predict_proba(df)[:, 1]
     return {
         "pd_scores": pd_scores,
@@ -128,17 +133,24 @@ def compute_default_pd_pack(bundle_path: str, bundle_sha: str, input_path: str, 
     }
 
 
-@st.cache_data
-def build_scenario_grid_cached(pd_scores_tuple, loan_amnt_tuple):
-    pd_scores = np.array(pd_scores_tuple)
-    loan_amnt = np.array(loan_amnt_tuple)
+def get_scenario_grid_once(default_df: pd.DataFrame, default_pd_scores: np.ndarray, bundle_sig: tuple, input_sig: tuple):
+    cache_key = ("scenario_grid", bundle_sig, input_sig)
 
-    base_scored_df = pd.DataFrame({
-        "pd_score": pd_scores,
-        "loan_amnt": loan_amnt,
-    })
+    if st.session_state.get("scenario_grid_key") != cache_key:
+        default_loan_amnt = pd.to_numeric(
+            default_df.get("loan_amnt", 0),
+            errors="coerce"
+        ).fillna(0.0).to_numpy()
 
-    return build_scenario_grid_from_scores(base_scored_df)
+        base_scored_df = pd.DataFrame({
+            "pd_score": default_pd_scores,
+            "loan_amnt": default_loan_amnt,
+        })
+
+        st.session_state.scenario_grid = build_scenario_grid_from_scores(base_scored_df)
+        st.session_state.scenario_grid_key = cache_key
+
+    return st.session_state.scenario_grid
 
 
 def validate_upload_columns(df: pd.DataFrame):
@@ -284,11 +296,11 @@ if not DEFAULT_INPUT_PATH.exists():
     st.error("Default scoring dataset not found at data/scored/new_applications_to_score.csv")
     st.stop()
 
-bundle_sha = file_sha256(DEFAULT_BUNDLE_PATH)
-input_sha = file_sha256(DEFAULT_INPUT_PATH)
+bundle_sig = file_signature(DEFAULT_BUNDLE_PATH)
+input_sig = file_signature(DEFAULT_INPUT_PATH)
 
 try:
-    bundle = load_bundle_cached(str(DEFAULT_BUNDLE_PATH), bundle_sha)
+    bundle = load_bundle_cached(str(DEFAULT_BUNDLE_PATH), bundle_sig)
 except Exception as e:
     st.error(f"Failed to load model bundle: {e}")
     st.stop()
@@ -297,21 +309,22 @@ model = bundle["model"]
 frozen_thresholds = bundle["thresholds"]
 metadata = bundle["metadata"]
 
-default_df = load_csv_cached(str(DEFAULT_INPUT_PATH), input_sha)
+default_df = load_csv_cached(str(DEFAULT_INPUT_PATH), input_sig)
 
 default_pd_pack = compute_default_pd_pack(
     str(DEFAULT_BUNDLE_PATH),
-    bundle_sha,
+    bundle_sig,
     str(DEFAULT_INPUT_PATH),
-    input_sha,
+    input_sig,
 )
 
 default_pd_scores = np.array(default_pd_pack["pd_scores"])
-default_loan_amnt = pd.to_numeric(default_df.get("loan_amnt", 0), errors="coerce").fillna(0.0).to_numpy()
 
-scenario_grid = build_scenario_grid_cached(
-    tuple(np.round(default_pd_scores, 12)),
-    tuple(np.round(default_loan_amnt, 2)),
+scenario_grid = get_scenario_grid_once(
+    default_df=default_df,
+    default_pd_scores=default_pd_scores,
+    bundle_sig=bundle_sig,
+    input_sig=input_sig,
 )
 
 runtime_identity = build_runtime_identity(DEFAULT_BUNDLE_PATH, DEFAULT_INPUT_PATH, metadata)
@@ -327,33 +340,56 @@ st.caption(f"Build: {APP_BUILD}")
 # --------------------------------------------------
 # Sidebar assistant
 # --------------------------------------------------
+if "assistant_goal" not in st.session_state:
+    st.session_state.assistant_goal = "Balanced"
+if "assistant_max_review_rate" not in st.session_state:
+    st.session_state.assistant_max_review_rate = 0.20
+if "assistant_min_approve_rate" not in st.session_state:
+    st.session_state.assistant_min_approve_rate = 0.50
+if "assistant_use_ollama" not in st.session_state:
+    st.session_state.assistant_use_ollama = False
+
+
 with st.sidebar:
     st.markdown("## 💡 Policy Assistant")
-    st.markdown('<div class="small-muted">Recommendations are based on the default scoring dataset so that policy scenarios stay consistent and comparable.</div>', unsafe_allow_html=True)
-
-    goal = st.selectbox(
-        "Preferred business goal",
-        ["Balanced", "Growth", "Conservative", "Operations-first"],
-        help="Select the business objective used to rank threshold candidates."
+    st.markdown(
+        '<div class="small-muted">Recommendations are based on the default scoring dataset so that policy scenarios stay consistent and comparable.</div>',
+        unsafe_allow_html=True
     )
 
-    max_review_rate = st.slider(
-        "Maximum review rate target",
-        0.05, 0.50, 0.20, 0.01,
-        help="Maximum acceptable proportion of applications routed to manual review."
-    )
+    with st.form("assistant_form", clear_on_submit=False):
+        goal_draft = st.selectbox(
+            "Preferred business goal",
+            ["Balanced", "Growth", "Conservative", "Operations-first"],
+            index=["Balanced", "Growth", "Conservative", "Operations-first"].index(st.session_state.assistant_goal),
+            help="Select the business objective used to rank threshold candidates."
+        )
 
-    min_approve_rate = st.slider(
-        "Minimum approve rate target",
-        0.20, 0.90, 0.50, 0.01,
-        help="Minimum desired auto-approval proportion."
-    )
+        max_review_rate_draft = st.slider(
+            "Maximum review rate target",
+            0.05, 0.50, float(st.session_state.assistant_max_review_rate), 0.01,
+            help="Maximum acceptable proportion of applications routed to manual review."
+        )
 
-    use_ollama = st.checkbox(
-        "Use Ollama Cloud explanation",
-        value=False,
-        help="Optional advisory AI explanation using Ollama's hosted API."
-    )
+        min_approve_rate_draft = st.slider(
+            "Minimum approve rate target",
+            0.20, 0.90, float(st.session_state.assistant_min_approve_rate), 0.01,
+            help="Minimum desired auto-approval proportion."
+        )
+
+        use_ollama_draft = st.checkbox(
+            "Use Ollama Cloud explanation",
+            value=st.session_state.assistant_use_ollama,
+            help="Optional advisory AI explanation using Ollama's hosted API."
+        )
+
+        assistant_submit = st.form_submit_button("Update policy assistant")
+
+    if assistant_submit:
+        st.session_state.assistant_goal = goal_draft
+        st.session_state.assistant_max_review_rate = max_review_rate_draft
+        st.session_state.assistant_min_approve_rate = min_approve_rate_draft
+        st.session_state.assistant_use_ollama = use_ollama_draft
 
     def _get_secret(name: str, default: str = "") -> str:
         try:
@@ -366,6 +402,12 @@ with st.sidebar:
         value=_get_secret("OLLAMA_MODEL", "gpt-oss:120b"),
         help="Hosted Ollama model name."
     )
+
+goal = st.session_state.assistant_goal
+max_review_rate = st.session_state.assistant_max_review_rate
+min_approve_rate = st.session_state.assistant_min_approve_rate
+use_ollama = st.session_state.assistant_use_ollama
+
 
 recommendation_df = recommend_thresholds(
     grid=scenario_grid,
@@ -446,21 +488,14 @@ with left_col:
     if st.session_state.active_t_high is None:
         st.session_state.active_t_high = default_t_high
 
-    # --------------------------------------------------
-    # Checkbox OUTSIDE the form so enable/disable updates immediately
-    # --------------------------------------------------
     use_frozen_thresholds = st.checkbox(
         "Use frozen engine thresholds",
         value=st.session_state.threshold_mode_frozen,
         key="threshold_mode_checkbox"
     )
 
-    # Keep session state in sync immediately
     st.session_state.threshold_mode_frozen = use_frozen_thresholds
 
-    # --------------------------------------------------
-    # Form only for applying slider values
-    # --------------------------------------------------
     with st.form("threshold_form", clear_on_submit=False):
         draft_t_low = st.slider(
             "Auto-approve threshold (t_low)",
@@ -480,9 +515,6 @@ with left_col:
 
         threshold_submit = st.form_submit_button("Apply thresholds")
 
-    # --------------------------------------------------
-    # Apply values only when the form is submitted
-    # --------------------------------------------------
     if threshold_submit:
         if use_frozen_thresholds:
             st.session_state.active_t_low = default_t_low
@@ -491,7 +523,6 @@ with left_col:
             st.session_state.active_t_low = draft_t_low
             st.session_state.active_t_high = draft_t_high
 
-    # Values used for actual execution
     if use_frozen_thresholds:
         t_low = default_t_low
         t_high = default_t_high
@@ -505,12 +536,12 @@ with left_col:
 
     st.markdown(
         f"""
-    **Current policy**
-    - Auto-approve if PD < **{t_low:.2f}**
-    - Review if **{t_low:.2f} ≤ PD < {t_high:.2f}**
-    - Reject if PD ≥ **{t_high:.2f}**
-    """
-        )
+**Current policy**
+- Auto-approve if PD < **{t_low:.2f}**
+- Review if **{t_low:.2f} ≤ PD < {t_high:.2f}**
+- Reject if PD ≥ **{t_high:.2f}**
+"""
+    )
 
 with right_col:
     st.subheader("Current engine state")
