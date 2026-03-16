@@ -221,38 +221,41 @@ def build_summary(scored_df: pd.DataFrame) -> dict:
     }
 
 def build_execution_explainer_prompt(summary: dict, run_info: dict) -> str:
+    def fmt_or_na(value, decimals=4):
+        return f"{value:.{decimals}f}" if pd.notna(value) else "NA"
+
     return f"""
-    You are an underwriting analytics assistant.
+You are an underwriting analytics assistant.
 
-    Interpret the following execution outcome for a probability-of-default underwriting engine.
+Interpret the following execution outcome for a probability-of-default underwriting engine.
 
-    Execution thresholds:
-    - t_low = {run_info['t_low_used']:.2f}
-    - t_high = {run_info['t_high_used']:.2f}
-    - input dataset = {run_info['input_name']}
-    - rows scored = {run_info['rows_scored']}
+Execution thresholds:
+- t_low = {run_info['t_low_used']:.2f}
+- t_high = {run_info['t_high_used']:.2f}
+- input dataset = {run_info['input_name']}
+- rows scored = {run_info['rows_scored']}
 
-    Execution result:
-    - approve count = {summary['approve_n']}
-    - review count = {summary['review_n']}
-    - reject count = {summary['reject_n']}
-    - approve rate = {summary['approve_rate']:.3f}
-    - review rate = {summary['review_rate']:.3f}
-    - reject rate = {summary['reject_rate']:.3f}
-    - average PD overall = {summary['avg_pd_overall']:.4f}
-    - average PD approve = {summary['avg_pd_approve']:.4f if pd.notna(summary['avg_pd_approve']) else 'NA'}
-    - average PD review = {summary['avg_pd_review']:.4f if pd.notna(summary['avg_pd_review']) else 'NA'}
-    - average PD reject = {summary['avg_pd_reject']:.4f if pd.notna(summary['avg_pd_reject']) else 'NA'}
-    - non-rejected risk proxy = {summary['risk_proxy_nonreject']:.2f}
+Execution result:
+- approve count = {summary['approve_n']}
+- review count = {summary['review_n']}
+- reject count = {summary['reject_n']}
+- approve rate = {summary['approve_rate']:.3f}
+- review rate = {summary['review_rate']:.3f}
+- reject rate = {summary['reject_rate']:.3f}
+- average PD overall = {summary['avg_pd_overall']:.4f}
+- average PD approve = {fmt_or_na(summary['avg_pd_approve'])}
+- average PD review = {fmt_or_na(summary['avg_pd_review'])}
+- average PD reject = {fmt_or_na(summary['avg_pd_reject'])}
+- non-rejected risk proxy = {summary['risk_proxy_nonreject']:.2f}
 
-    Write a concise but useful explanation in plain English covering:
-    1. what this execution means,
-    2. the likely business benefits,
-    3. the likely operational or risk trade-offs,
-    4. one or two possible next adjustments to consider.
+Write a concise but useful explanation in plain English covering:
+1. what this execution means,
+2. the likely business benefits,
+3. the likely operational or risk trade-offs,
+4. one or two possible next adjustments to consider.
 
-    Do not make legal or regulatory claims. Keep it advisory and practical.
-    """.strip()
+Do not make legal or regulatory claims. Keep it advisory and practical.
+""".strip()
 
 def render_recommendation_panel(goal: str, recommendation_df: pd.DataFrame):
     if recommendation_df.empty:
@@ -723,8 +726,17 @@ if "scored_df" in st.session_state:
 
     execution_ai_text = None
     if use_ollama:
-        execution_prompt = build_execution_explainer_prompt(summary, st.session_state.last_run_info)
-        execution_ai_text = ollama_explanation(execution_prompt, model_name=ollama_model_name)
+        try:
+            execution_prompt = build_execution_explainer_prompt(
+                summary,
+                st.session_state.last_run_info
+            )
+            execution_ai_text = ollama_explanation(
+                execution_prompt,
+                model_name=ollama_model_name
+            )
+        except Exception as e:
+            execution_ai_text = f"Execution explanation unavailable: {e}"
 
     st.success("Scoring completed successfully.")
     st.json(st.session_state.last_run_info)
