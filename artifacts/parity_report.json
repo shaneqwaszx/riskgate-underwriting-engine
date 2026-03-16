@@ -1,0 +1,50 @@
+{
+  "python_version": "3.12.8",
+  "sklearn_version": "1.8.0",
+  "xgboost_version": "3.2.0",
+  "bundle_path": "C:\\Users\\shane\\Desktop\\Y3S2\\3. IS424 DMBA\\Project\\RiskGate_project\\artifacts\\final_model_bundle.joblib",
+  "bundle_sha256": "2ef9b7e5088d19a9172c1431493b174f4486fed3b9e089adc4eb11d39d561224",
+  "input_path": "C:\\Users\\shane\\Desktop\\Y3S2\\3. IS424 DMBA\\Project\\RiskGate_project\\data\\scored\\new_applications_to_score.csv",
+  "input_sha256": "4a854d8edad37ce30ec7213b8515f83b382bce01be083bcff81b51c8815858be",
+  "engine_version": "0.2.0",
+  "bundle_created_at": "2026-03-11T18:03:07.889218+00:00",
+  "thresholds": {
+    "t_low": 0.1,
+    "t_high": 0.28
+  },
+  "n_rows": 78237,
+  "pd_summary": {
+    "mean": 0.19665178650781387,
+    "std": 0.2810419396984653,
+    "min": 0.029827534667934363,
+    "max": 0.9928250737404041
+  },
+  "decision_counts": {
+    "approve": 47010,
+    "review": 16007,
+    "reject": 15220
+  },
+  "first_1000_prediction_fingerprint": "f21361c0b4925a27e449a54a84de7d37ca5aa6eee625ff0fa4fe885435918c60",
+  "first_20_pd_scores": [
+    0.2600474631677723,
+    0.2125109993914879,
+    0.06657412362533674,
+    0.992761852206866,
+    0.02990936227048615,
+    0.9927997845845077,
+    0.029922674040805074,
+    0.029880478596231892,
+    0.05431956250043818,
+    0.02989797880030982,
+    0.0372792859062535,
+    0.10055980576365764,
+    0.17067018233164882,
+    0.15249198625564553,
+    0.18032190167724288,
+    0.9927609976786724,
+    0.09941882837832972,
+    0.062317435205125705,
+    0.08676968641986585,
+    0.039561372596987276
+  ]
+}
