@@ -1,6 +1,6 @@
 # RiskGate: Probability-of-Default (PD) Modelling for Automated Underwriting
 
-RiskGate is an undergraduate Business Analytics / Data Mining project that builds a calibrated probability-of-default (PD) underwriting engine for LendingClub-style loan data.
+RiskGate is an undergraduate Business Analytics / Data Mining project that builds a probability-of-default (PD) underwriting engine for LendingClub-style loan data.
 
 The system supports a 3-tier decision policy:
 - Auto-approve for low-risk applicants
@@ -9,7 +9,7 @@ The system supports a 3-tier decision policy:
 
 The current local prototype includes:
 - model training and artifact saving
-- calibrated scoring
+- calibration diagnostics (retained separately)
 - frozen underwriting thresholds
 - reusable batch scoring
 - a Streamlit website for threshold tuning and portfolio reporting

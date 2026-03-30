@@ -134,8 +134,14 @@ def compute_default_pd_pack(bundle_path: str, bundle_sig: tuple, input_path: str
     }
 
 
-def get_scenario_grid_once(default_df: pd.DataFrame, default_pd_scores: np.ndarray, bundle_sig: tuple, input_sig: tuple):
-    cache_key = ("scenario_grid", bundle_sig, input_sig)
+def get_scenario_grid_once(
+    default_df: pd.DataFrame,
+    default_pd_scores: np.ndarray,
+    bundle_sig: tuple,
+    input_sig: tuple,
+    frozen_thresholds: dict,
+):
+    cache_key = ("scenario_grid", bundle_sig, input_sig, frozen_thresholds["t_low"], frozen_thresholds["t_high"])
 
     if st.session_state.get("scenario_grid_key") != cache_key:
         default_loan_amnt = pd.to_numeric(
@@ -148,7 +154,18 @@ def get_scenario_grid_once(default_df: pd.DataFrame, default_pd_scores: np.ndarr
             "loan_amnt": default_loan_amnt,
         })
 
-        st.session_state.scenario_grid = build_scenario_grid_from_scores(base_scored_df)
+        t_low_candidates = np.sort(np.unique(np.round(
+            np.append(np.arange(0.05, 0.21, 0.02), [float(frozen_thresholds["t_low"])]), 2
+        )))
+        t_high_candidates = np.sort(np.unique(np.round(
+            np.append(np.arange(0.15, 0.41, 0.02), [float(frozen_thresholds["t_high"])]), 2
+        )))
+
+        st.session_state.scenario_grid = build_scenario_grid_from_scores(
+            base_scored_df,
+            t_low_values=t_low_candidates,
+            t_high_values=t_high_candidates,
+        )
         st.session_state.scenario_grid_key = cache_key
 
     return st.session_state.scenario_grid
@@ -362,6 +379,7 @@ scenario_grid = get_scenario_grid_once(
     default_pd_scores=default_pd_scores,
     bundle_sig=bundle_sig,
     input_sig=input_sig,
+    frozen_thresholds=frozen_thresholds,
 )
 
 runtime_identity = build_runtime_identity(DEFAULT_BUNDLE_PATH, DEFAULT_INPUT_PATH, metadata)
@@ -371,14 +389,14 @@ default_parity_summary = compute_default_parity_summary(default_pd_scores, froze
 # Title
 # --------------------------------------------------
 st.title("RiskGate: Automated Underwriting Policy Engine")
-st.caption("Local scoring prototype for calibrated PD-based approve / review / reject decisioning")
+st.caption("Local scoring prototype for PD-based approve / review / reject decisioning")
 st.caption(f"Build: {APP_BUILD}")
 
 # --------------------------------------------------
 # Sidebar assistant
 # --------------------------------------------------
 if "assistant_goal" not in st.session_state:
-    st.session_state.assistant_goal = "Balanced"
+    st.session_state.assistant_goal = "Frozen benchmark"
 if "assistant_max_review_rate" not in st.session_state:
     st.session_state.assistant_max_review_rate = 0.20
 if "assistant_min_approve_rate" not in st.session_state:
@@ -395,11 +413,19 @@ with st.sidebar:
     )
 
     with st.form("assistant_form", clear_on_submit=False):
+        goal_options = [
+            "Frozen benchmark",
+            "Balanced",
+            "Growth",
+            "Conservative",
+            "Operations-first",
+        ]
+
         goal_draft = st.selectbox(
             "Preferred business goal",
-            ["Balanced", "Growth", "Conservative", "Operations-first"],
-            index=["Balanced", "Growth", "Conservative", "Operations-first"].index(st.session_state.assistant_goal),
-            help="Select the business objective used to rank threshold candidates."
+            goal_options,
+            index=goal_options.index(st.session_state.assistant_goal),
+            help="Select either the fixed deployed benchmark or an optimized business objective."
         )
 
         max_review_rate_draft = st.slider(
@@ -451,6 +477,8 @@ recommendation_df = recommend_thresholds(
     goal=goal,
     max_review_rate=max_review_rate,
     min_approve_rate=min_approve_rate,
+    frozen_t_low=float(frozen_thresholds["t_low"]),
+    frozen_t_high=float(frozen_thresholds["t_high"]),
 )
 
 assistant_diag = diagnose_assistant_constraints(
@@ -491,18 +519,21 @@ with st.sidebar:
 
     with st.expander("Explain the business goals", expanded=False):
         st.markdown("""
-**Balanced**  
-Tries to maintain a healthy approval rate while penalizing excessive retained risk and avoiding review overload.
+                    **Frozen benchmark**  
+                    Uses the currently deployed production thresholds stored in the final model bundle. This acts as a fixed benchmark for comparison.
 
-**Growth**  
-Favours higher approvals and conversion, while still applying a lighter penalty to retained risk.
+                    **Balanced**  
+                    Tries to maintain a healthy approval rate while penalizing excessive retained risk and avoiding review overload.
 
-**Conservative**  
-Prioritizes lower retained risk in the non-rejected pool, even if approval volume falls.
+                    **Growth**  
+                    Favours higher approvals and conversion, while still applying a lighter penalty to retained risk.
 
-**Operations-first**  
-Prioritizes a smaller review queue so the underwriting team can manage workload more easily.
-""")
+                    **Conservative**  
+                    Prioritizes lower retained risk in the non-rejected pool, even if approval volume falls.
+
+                    **Operations-first**  
+                    Prioritizes a smaller review queue so the underwriting team can manage workload more easily.
+                    """)
 
     with st.expander("How the policy assistant derives recommendations", expanded=False):
         st.markdown("""

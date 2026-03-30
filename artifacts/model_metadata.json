@@ -1,7 +1,7 @@
 {
   "app_name": "RiskGate",
-  "engine_version": "0.2.0",
-  "created_at_utc": "2026-03-11T19:36:36.388495+00:00",
+  "engine_version": "0.2.1",
+  "created_at_utc": "2026-03-30T06:07:27.134097+00:00",
   "random_state": 0,
   "train_csv": "data\\raw\\lc_trainingset.csv",
   "training_rows_total": 316824,
@@ -21,8 +21,10 @@
     "tree_method": "hist",
     "n_jobs": -1
   },
+  "deployment_model_variant": "uncalibrated_pipeline",
   "calibration_method": "sigmoid",
   "calibration_cv": 5,
+  "calibration_retained_in_final_bundle": false,
   "target_col": "loan_status",
   "target_binary_col": "target_default",
   "label_map": {
@@ -33,11 +35,25 @@
     "t_low": 0.1,
     "t_high": 0.28
   },
+  "validation_metrics": {
+    "uncalibrated": {
+      "model_name": "xgb_uncalibrated",
+      "roc_auc": 0.9088303152275412,
+      "average_precision": 0.7842431016712126,
+      "brier": 0.08083720843986256
+    },
+    "calibrated": {
+      "model_name": "xgb_calibrated",
+      "roc_auc": 0.9094030753236639,
+      "average_precision": 0.7855067307600833,
+      "brier": 0.08239742683643467
+    }
+  },
   "notebook_reference_metrics": {
     "roc_auc": 0.9097792632943688,
     "average_precision": 0.7852013757526998,
     "brier_uncalibrated": 0.0807392954093243,
     "best_binary_threshold": 0.35
   },
-  "notes": "Frozen notebook recipe used for XGBoost model family and operating logic. Final saved artifact was rebuilt cleanly for reusable scoring."
+  "notes": "Calibration was evaluated as a leakage-safe diagnostic, but the final deployed bundle intentionally retains the uncalibrated XGBoost pipeline because probability-quality and internal-consistency checks did not support keeping calibration in the production-style artifact."
 }

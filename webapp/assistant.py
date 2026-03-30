@@ -29,6 +29,10 @@ def build_scenario_grid_from_scores(
     if t_high_values is None:
         t_high_values = np.round(np.arange(0.15, 0.41, 0.02), 2)
 
+    # ensure sorted unique values
+    t_low_values = np.sort(np.unique(np.round(np.array(t_low_values, dtype=float), 2)))
+    t_high_values = np.sort(np.unique(np.round(np.array(t_high_values, dtype=float), 2)))
+
     pd_scores = base_scored_df["pd_score"].to_numpy()
     loan_amnt = pd.to_numeric(
         base_scored_df.get("loan_amnt", pd.Series(0, index=base_scored_df.index)),
@@ -80,88 +84,91 @@ def build_scenario_grid_from_scores(
 def recommend_thresholds(
     grid: pd.DataFrame,
     goal: str,
-    max_review_rate: float,
-    min_approve_rate: float
+    max_review_rate: float = 0.20,
+    min_approve_rate: float = 0.50,
+    frozen_t_low: float | None = None,
+    frozen_t_high: float | None = None,
 ) -> pd.DataFrame:
-    """
-    Deterministic recommendation engine.
-    Targets act as both hard feasibility filters (when possible)
-    and soft preferences through proximity scoring.
-    """
-    if grid.empty:
-        return grid
+    g = grid.copy()
 
-    feasible = grid[
-        (grid["review_rate"] <= max_review_rate) &
-        (grid["approve_rate"] >= min_approve_rate)
+    # helper features used by the composite scoring formulas
+    g["review_proximity"] = 1.0 - (g["review_rate"] - max_review_rate).abs()
+    g["approve_proximity"] = 1.0 - (g["approve_rate"] - min_approve_rate).abs()
+    g["constraint_penalty"] = (
+        np.maximum(g["review_rate"] - max_review_rate, 0.0) +
+        np.maximum(min_approve_rate - g["approve_rate"], 0.0)
+    )
+
+    if goal == "Frozen benchmark":
+        if frozen_t_low is None or frozen_t_high is None:
+            raise ValueError("Frozen benchmark requested but frozen thresholds were not provided.")
+
+        mask = (
+            np.isclose(g["t_low"], frozen_t_low) &
+            np.isclose(g["t_high"], frozen_t_high)
+        )
+
+        if not mask.any():
+            raise ValueError(
+                f"Frozen threshold pair (t_low={frozen_t_low}, t_high={frozen_t_high}) "
+                "was not found in the scenario grid."
+            )
+
+        out = g.loc[mask].copy()
+        out["goal"] = "Frozen benchmark"
+        out["score"] = np.nan
+        out["selection_reason"] = "Fixed deployed production pair"
+        return out.head(1)
+
+    feasible = g[
+        (g["review_rate"] <= max_review_rate) &
+        (g["approve_rate"] >= min_approve_rate)
     ].copy()
 
-    used_fallback = False
-    if feasible.empty:
-        feasible = grid.copy()
-        used_fallback = True
-
-    # Constraint-gap diagnostics
-    feasible["review_excess"] = np.maximum(0, feasible["review_rate"] - max_review_rate)
-    feasible["approve_shortfall"] = np.maximum(0, min_approve_rate - feasible["approve_rate"])
-    feasible["constraint_penalty"] = feasible["review_excess"] + feasible["approve_shortfall"]
-
-    # Soft preference: among feasible candidates, prefer ones near the stated targets
-    feasible["review_proximity"] = -np.abs(feasible["review_rate"] - max_review_rate)
-    feasible["approve_proximity"] = -np.abs(feasible["approve_rate"] - min_approve_rate)
+    candidate_pool = feasible if not feasible.empty else g.copy()
 
     if goal == "Balanced":
-        feasible["score"] = (
-            feasible["approve_rate"]
-            - 0.50 * feasible["risk_proxy_norm"]
-            + 0.20 * feasible["review_proximity"]
-            + 0.15 * feasible["approve_proximity"]
-            - 2.00 * feasible["constraint_penalty"]
+        candidate_pool["score"] = (
+            candidate_pool["approve_rate"]
+            - 0.50 * candidate_pool["risk_proxy_norm"]
+            + 0.20 * candidate_pool["review_proximity"]
+            + 0.15 * candidate_pool["approve_proximity"]
+            - 2.00 * candidate_pool["constraint_penalty"]
         )
 
     elif goal == "Growth":
-        feasible["score"] = (
-            1.20 * feasible["approve_rate"]
-            - 0.25 * feasible["risk_proxy_norm"]
-            + 0.10 * feasible["review_proximity"]
-            + 0.20 * feasible["approve_proximity"]
-            - 2.00 * feasible["constraint_penalty"]
+        candidate_pool["score"] = (
+            1.20 * candidate_pool["approve_rate"]
+            - 0.25 * candidate_pool["risk_proxy_norm"]
+            + 0.10 * candidate_pool["review_proximity"]
+            + 0.20 * candidate_pool["approve_proximity"]
+            - 2.00 * candidate_pool["constraint_penalty"]
         )
 
     elif goal == "Conservative":
-        feasible["score"] = (
-            -1.10 * feasible["risk_proxy_norm"]
-            + 0.10 * feasible["approve_rate"]
-            + 0.10 * feasible["review_proximity"]
-            + 0.10 * feasible["approve_proximity"]
-            - 2.00 * feasible["constraint_penalty"]
+        candidate_pool["score"] = (
+            -1.10 * candidate_pool["risk_proxy_norm"]
+            + 0.10 * candidate_pool["approve_rate"]
+            + 0.10 * candidate_pool["review_proximity"]
+            + 0.10 * candidate_pool["approve_proximity"]
+            - 2.00 * candidate_pool["constraint_penalty"]
         )
 
     elif goal == "Operations-first":
-        feasible["score"] = (
-            -1.20 * feasible["review_rate"]
-            + 0.20 * feasible["approve_rate"]
-            - 0.20 * feasible["risk_proxy_norm"]
-            + 0.20 * feasible["review_proximity"]
-            + 0.10 * feasible["approve_proximity"]
-            - 2.00 * feasible["constraint_penalty"]
+        candidate_pool["score"] = (
+            -1.20 * candidate_pool["review_rate"]
+            + 0.20 * candidate_pool["approve_rate"]
+            - 0.20 * candidate_pool["risk_proxy_norm"]
+            + 0.20 * candidate_pool["review_proximity"]
+            + 0.10 * candidate_pool["approve_proximity"]
+            - 2.00 * candidate_pool["constraint_penalty"]
         )
 
     else:
-        feasible["score"] = (
-            feasible["approve_rate"]
-            - 0.50 * feasible["risk_proxy_norm"]
-            + 0.20 * feasible["review_proximity"]
-            + 0.15 * feasible["approve_proximity"]
-            - 2.00 * feasible["constraint_penalty"]
-        )
+        raise ValueError(f"Unknown goal: {goal}")
 
-    feasible["used_fallback"] = used_fallback
-
-    return feasible.sort_values(
-        ["constraint_penalty", "score"],
-        ascending=[True, False]
-    ).head(5)
+    candidate_pool["goal"] = goal
+    return candidate_pool.sort_values("score", ascending=False).head(1)
 
 def diagnose_assistant_constraints(
     grid: pd.DataFrame,

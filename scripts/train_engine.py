@@ -117,16 +117,31 @@ def main():
             raise ValueError(f"Unexpected best model name: {best_name}")
 
     # --------------------------------------------------
-    # Fit calibrated model on development split
+    # Validation-stage scoring: final bundle uses UNCALIBRATED pipeline
+    # Calibration is retained only as a diagnostic artifact.
     # --------------------------------------------------
     chosen_base_estimator = build_pipeline(chosen_model_family, xgb_params=chosen_xgb_params)
-    calibrated_model = fit_calibrated_model(chosen_base_estimator, X_train, y_train)
+    chosen_base_estimator.fit(X_train, y_train)
 
-    valid_pd = calibrated_model.predict_proba(X_valid)[:, 1]
-    calibrated_metrics = evaluate_probabilities(y_valid, valid_pd, f"{chosen_model_family}_calibrated")
+    valid_pd_uncalibrated = chosen_base_estimator.predict_proba(X_valid)[:, 1]
+    uncalibrated_metrics = evaluate_probabilities(
+        y_valid,
+        valid_pd_uncalibrated,
+        f"{chosen_model_family}_uncalibrated",
+    )
+    save_json(uncalibrated_metrics, artifacts_dir / "uncalibrated_validation_metrics.json")
+
+    calibration_estimator = build_pipeline(chosen_model_family, xgb_params=chosen_xgb_params)
+    calibrated_model = fit_calibrated_model(calibration_estimator, X_train, y_train)
+    valid_pd_calibrated = calibrated_model.predict_proba(X_valid)[:, 1]
+    calibrated_metrics = evaluate_probabilities(
+        y_valid,
+        valid_pd_calibrated,
+        f"{chosen_model_family}_calibrated",
+    )
     save_json(calibrated_metrics, artifacts_dir / "calibrated_validation_metrics.json")
 
-    threshold_table = build_binary_threshold_table(y_valid.to_numpy(), valid_pd)
+    threshold_table = build_binary_threshold_table(y_valid.to_numpy(), valid_pd_uncalibrated)
     save_dataframe(threshold_table, artifacts_dir / "threshold_sweep.csv")
 
     ead_valid = pd.to_numeric(X_valid[cfg.EAD_PROXY_COL], errors="coerce").fillna(0.0).to_numpy()
@@ -147,7 +162,7 @@ def main():
     else:
         policy_grid = build_policy_grid(
             y_true=y_valid.to_numpy(),
-            p_default=valid_pd,
+            p_default=valid_pd_uncalibrated,
             ead_proxy=ead_valid,
         )
         save_dataframe(policy_grid, artifacts_dir / "policy_grid.csv")
@@ -157,7 +172,7 @@ def main():
 
     policy_summary = summarize_policy(
         y_true=y_valid.to_numpy(),
-        p_default=valid_pd,
+        p_default=valid_pd_uncalibrated,
         ead_proxy=ead_valid,
         t_low=chosen_policy["t_low"],
         t_high=chosen_policy["t_high"],
@@ -167,8 +182,12 @@ def main():
     # --------------------------------------------------
     # Final refit on all labelled data
     # --------------------------------------------------
-    final_base_estimator = build_pipeline(chosen_model_family, xgb_params=chosen_xgb_params)
-    final_calibrated_model = fit_calibrated_model(final_base_estimator, X, y)
+    final_uncalibrated_model = build_pipeline(chosen_model_family, xgb_params=chosen_xgb_params)
+    final_uncalibrated_model.fit(X, y)
+
+    # Optional retained diagnostic artifact: calibrated version kept separately.
+    final_calibration_estimator = build_pipeline(chosen_model_family, xgb_params=chosen_xgb_params)
+    final_calibrated_model = fit_calibrated_model(final_calibration_estimator, X, y)
 
     feature_schema = {
         "numeric_features": cfg.NUMERIC_FEATURES,
@@ -189,8 +208,10 @@ def main():
         "validation_rows": int(len(X_valid)),
         "chosen_model_name": chosen_model_family,
         "chosen_xgb_params": chosen_xgb_params,
+        "deployment_model_variant": "uncalibrated_pipeline",
         "calibration_method": cfg.CALIBRATION_METHOD,
         "calibration_cv": cfg.CALIBRATION_CV,
+        "calibration_retained_in_final_bundle": False,
         "target_col": cfg.TARGET_COL,
         "target_binary_col": cfg.TARGET_BINARY_COL,
         "label_map": cfg.LABEL_MAP,
@@ -198,16 +219,21 @@ def main():
             "t_low": chosen_policy["t_low"],
             "t_high": chosen_policy["t_high"],
         },
+        "validation_metrics": {
+            "uncalibrated": uncalibrated_metrics,
+            "calibrated": calibrated_metrics,
+        },
         "notebook_reference_metrics": cfg.NOTEBOOK_REFERENCE_METRICS,
         "notes": (
-            "Frozen notebook recipe used for XGBoost model family and operating logic. "
-            "Final saved artifact was rebuilt cleanly for reusable scoring."
+            "Calibration was evaluated as a leakage-safe diagnostic, but the final deployed bundle "
+            "intentionally retains the uncalibrated XGBoost pipeline because probability-quality and "
+            "internal-consistency checks did not support keeping calibration in the production-style artifact."
         ),
     }
     save_json(metadata, artifacts_dir / "model_metadata.json")
 
     bundle = {
-        "model": final_calibrated_model,
+        "model": final_uncalibrated_model,
         "thresholds": {
             "t_low": chosen_policy["t_low"],
             "t_high": chosen_policy["t_high"],
@@ -216,11 +242,13 @@ def main():
         "metadata": metadata,
     }
 
+    save_joblib(final_uncalibrated_model, artifacts_dir / "final_uncalibrated_model.joblib")
     save_joblib(final_calibrated_model, artifacts_dir / "final_calibrated_model.joblib")
     save_joblib(bundle, artifacts_dir / "final_model_bundle.joblib")
 
     print("Training complete.")
     print(f"Frozen recipe model family: {chosen_model_family}")
+    print("Final bundle model variant: uncalibrated_pipeline")
     print(f"Frozen t_low={chosen_policy['t_low']:.2f}, t_high={chosen_policy['t_high']:.2f}")
     print(f"Artifacts saved to: {artifacts_dir.resolve()}")
 

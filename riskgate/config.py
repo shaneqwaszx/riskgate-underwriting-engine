@@ -1,7 +1,7 @@
 from pathlib import Path
 
 APP_NAME = "RiskGate"
-ENGINE_VERSION = "0.2.0"
+ENGINE_VERSION = "0.2.1"
 RANDOM_STATE = 0
 
 PROJECT_ROOT = Path(".")

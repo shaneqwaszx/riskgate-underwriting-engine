@@ -1,16 +1,16 @@
 {
   "t_low": 0.1,
   "t_high": 0.28,
-  "approve_rate": 0.5997811632017507,
-  "review_rate": 0.20432833936537328,
-  "reject_rate": 0.195890497432876,
-  "approve_observed_default_rate": 0.03871386472074095,
-  "review_observed_default_rate": 0.21121466453838628,
-  "reject_observed_default_rate": 0.6646436435898813,
-  "nonrejected_observed_default_rate": 0.08254720066990279,
-  "approve_avg_pd": 0.04504834476296003,
-  "review_avg_pd": 0.16701519873368617,
-  "reject_avg_pd": 0.6928683040224524,
-  "risk_proxy_nonrejected": 79948199.26380508,
-  "risk_proxy_approved_only": 34051609.52316399
+  "approve_rate": 0.48526007911791935,
+  "review_rate": 0.29893317060853464,
+  "reject_rate": 0.215806750273546,
+  "approve_observed_default_rate": 0.018840925351776772,
+  "review_observed_default_rate": 0.17192834266004997,
+  "reject_observed_default_rate": 0.6303627145085804,
+  "nonrejected_observed_default_rate": 0.07719759579263712,
+  "approve_avg_pd": 0.019658619537949562,
+  "review_avg_pd": 0.17684568464756012,
+  "reject_avg_pd": 0.623684287071228,
+  "risk_proxy_nonrejected": 80277644.08578368,
+  "risk_proxy_approved_only": 11991079.611429928
 }
