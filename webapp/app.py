@@ -62,7 +62,24 @@ REQUIRED_UPLOAD_COLUMNS = [
 ]
 
 OPTIONAL_LOCATION_COLUMNS = ["address", "state", "addr_state"]
-
+TEXT_UPLOAD_COLUMNS = [
+    "application_id",
+    "term",
+    "emp_length",
+    "grade",
+    "sub_grade",
+    "home_ownership",
+    "verification_status",
+    "purpose",
+    "application_type",
+    "initial_list_status",
+    "issue_d",
+    "earliest_cr_line",
+    "address",
+    "zip_code",
+    "state",
+    "addr_state",
+]
 
 # --------------------------------------------------
 # Page setup
@@ -176,6 +193,25 @@ def validate_upload_columns(df: pd.DataFrame):
     has_location = any(c in df.columns for c in OPTIONAL_LOCATION_COLUMNS)
     return missing_required, has_location
 
+def sanitize_uploaded_input(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+
+    # Preserve text-like fields and remove pandas nullable-string / pd.NA issues
+    for col in out.columns:
+        dtype_name = str(out[col].dtype)
+
+        if col in TEXT_UPLOAD_COLUMNS or pd.api.types.is_string_dtype(out[col]) or pd.api.types.is_object_dtype(out[col]):
+            out[col] = out[col].astype("object")
+            out.loc[pd.isna(out[col]), col] = np.nan
+
+        elif dtype_name in ["Int64", "Int32", "Int16", "Int8", "UInt64", "UInt32", "UInt16", "UInt8", "Float64", "Float32"]:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+
+        elif dtype_name == "boolean":
+            out[col] = out[col].astype("object")
+            out.loc[pd.isna(out[col]), col] = np.nan
+
+    return out
 
 def apply_decisions_from_pd(raw_df: pd.DataFrame, pd_scores: np.ndarray, t_low: float, t_high: float) -> pd.DataFrame:
     decisions = assign_decision(pd_scores, t_low, t_high)
@@ -695,7 +731,9 @@ uploaded_file = st.file_uploader("Upload a raw applications CSV", type=["csv"])
 use_default_dataset = st.checkbox("Use default scoring dataset", value=True)
 
 if uploaded_file is not None:
-    input_df = pd.read_csv(uploaded_file)
+    dtype_map = {col: "string" for col in TEXT_UPLOAD_COLUMNS}
+    input_df = pd.read_csv(uploaded_file, dtype=dtype_map)
+    input_df = sanitize_uploaded_input(input_df)
     input_name = uploaded_file.name
 
     missing_required, has_location = validate_upload_columns(input_df)
@@ -734,9 +772,10 @@ if run_button:
             t_high=t_high,
         )
     else:
-        uploaded_pd_scores = model.predict_proba(input_df)[:, 1]
+        safe_input_df = sanitize_uploaded_input(input_df)
+        uploaded_pd_scores = model.predict_proba(safe_input_df)[:, 1]
         scored_df = apply_decisions_from_pd(
-            raw_df=input_df,
+            raw_df=safe_input_df,
             pd_scores=uploaded_pd_scores,
             t_low=t_low,
             t_high=t_high,
