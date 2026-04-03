@@ -28,11 +28,31 @@ from webapp.assistant import (
     ollama_explanation,
 )
 
+import io
+
+from riskgate.explainability import (
+    make_xgb_contrib_pack,
+    global_contrib_table,
+    local_contrib_table,
+)
+
+from riskgate.fairness import (
+    get_candidate_group_cols,
+    build_group_outcome_table,
+    build_feat_assessment_table,
+    build_all_group_outcome_tables,
+)
+
+from riskgate.drift import build_drift_report
+from riskgate.history import append_run_history, run_history_df
+from riskgate.reviewer import append_override_log, load_override_log
+
 APP_BUILD = "2026-03-11-clean-reset-v1"
 
 DEFAULT_BUNDLE_PATH = PROJECT_ROOT / "artifacts" / "final_model_bundle.joblib"
 DEFAULT_INPUT_PATH = PROJECT_ROOT / "data" / "scored" / "new_applications_to_score.csv"
 TEMPLATE_PATH = PROJECT_ROOT / "data" / "scored" / "upload_template.csv"
+OVERRIDE_LOG_PATH = PROJECT_ROOT / "data" / "scored" / "reviewer_overrides.csv"
 
 REQUIRED_UPLOAD_COLUMNS = [
     "loan_amnt",
@@ -112,6 +132,8 @@ if "active_t_low" not in st.session_state:
 if "active_t_high" not in st.session_state:
     st.session_state.active_t_high = None
 
+if "run_history" not in st.session_state:
+    st.session_state.run_history = []
 
 # --------------------------------------------------
 # Helpers
@@ -150,6 +172,50 @@ def compute_default_pd_pack(bundle_path: str, bundle_sig: tuple, input_path: str
         "rows": len(df),
     }
 
+
+@st.cache_data(show_spinner=False)
+def load_uploaded_csv_cached(file_bytes: bytes) -> pd.DataFrame:
+    dtype_map = {col: "string" for col in TEXT_UPLOAD_COLUMNS}
+    df = pd.read_csv(io.BytesIO(file_bytes), dtype=dtype_map)
+    return sanitize_uploaded_input(df)
+
+
+@st.cache_data(show_spinner=False)
+def score_uploaded_csv_cached(bundle_path: str, bundle_sig: tuple, file_bytes: bytes):
+    bundle = load_bundle_cached(bundle_path, bundle_sig)
+    model = bundle["model"]
+    df = load_uploaded_csv_cached(file_bytes)
+    pd_scores = model.predict_proba(df)[:, 1]
+
+    return {
+        "df": df,
+        "pd_scores": pd_scores,
+        "file_hash": hashlib.sha256(file_bytes).hexdigest(),
+    }
+
+@st.cache_data(show_spinner=False)
+def precompute_fairness_tables(raw_df: pd.DataFrame, scored_df: pd.DataFrame, min_group_size: int, max_unique: int):
+    _, candidate_cols, table_map = build_all_group_outcome_tables(
+        raw_df=raw_df,
+        scored_df=scored_df,
+        min_group_size=min_group_size,
+        max_unique=max_unique,
+    )
+    return candidate_cols, table_map
+
+def build_comparison_table(current_summary: dict, benchmark_summary: dict) -> pd.DataFrame:
+    rows = [
+        ("Approve rate", current_summary["approve_rate"], benchmark_summary["approve_rate"]),
+        ("Review rate", current_summary["review_rate"], benchmark_summary["review_rate"]),
+        ("Reject rate", current_summary["reject_rate"], benchmark_summary["reject_rate"]),
+        ("Avg PD overall", current_summary["avg_pd_overall"], benchmark_summary["avg_pd_overall"]),
+        ("Avg PD approve", current_summary["avg_pd_approve"], benchmark_summary["avg_pd_approve"]),
+        ("Risk proxy non-rejected", current_summary["risk_proxy_nonreject"], benchmark_summary["risk_proxy_nonreject"]),
+    ]
+
+    out = pd.DataFrame(rows, columns=["metric", "current", "frozen_benchmark"])
+    out["delta"] = out["current"] - out["frozen_benchmark"]
+    return out
 
 def get_scenario_grid_once(
     default_df: pd.DataFrame,
@@ -544,10 +610,24 @@ with st.sidebar:
         st.caption("ASSISTANT DIAGNOSTICS")
         st.write(assistant_diag["message"])
 
-        if assistant_diag["review_target_binding"] is not None:
+        if "top_review_rate" in assistant_diag:
             c1, c2 = st.columns(2)
-            c1.metric("Review target gap", f"{assistant_diag['review_gap']:.1%}")
-            c2.metric("Approve target gap", f"{assistant_diag['approve_gap']:.1%}")
+
+            c1.metric(
+                "Review rate",
+                f"{assistant_diag['top_review_rate']:.1%}",
+                delta=f"{assistant_diag['review_vs_target']:+.1%} vs max"
+            )
+
+            c2.metric(
+                "Approve rate",
+                f"{assistant_diag['top_approve_rate']:.1%}",
+                delta=f"{assistant_diag['approve_vs_target']:+.1%} vs minimum"
+            )
+
+            st.caption(
+                f"Interpretation: {assistant_diag['review_text']}. {assistant_diag['approve_text']}."
+            )
 
     if st.button("Apply recommended thresholds", use_container_width=True):
         apply_top_recommendation(recommendation_df)
@@ -731,18 +811,17 @@ uploaded_file = st.file_uploader("Upload a raw applications CSV", type=["csv"])
 use_default_dataset = st.checkbox("Use default scoring dataset", value=True)
 
 if uploaded_file is not None:
-    dtype_map = {col: "string" for col in TEXT_UPLOAD_COLUMNS}
-    input_df = pd.read_csv(uploaded_file, dtype=dtype_map)
-    input_df = sanitize_uploaded_input(input_df)
+    file_bytes = uploaded_file.getvalue()
+    upload_pack = score_uploaded_csv_cached(str(DEFAULT_BUNDLE_PATH), bundle_sig, file_bytes)
+
+    input_df = upload_pack["df"]
+    uploaded_pd_scores = np.array(upload_pack["pd_scores"])
     input_name = uploaded_file.name
 
     missing_required, has_location = validate_upload_columns(input_df)
 
     if missing_required:
-        st.error(
-            "Uploaded CSV is missing required columns: "
-            + ", ".join(missing_required)
-        )
+        st.error("Uploaded CSV is missing required columns: " + ", ".join(missing_required))
         st.stop()
 
     if not has_location:
@@ -765,30 +844,37 @@ run_button = st.button("Execute underwriting engine", type="primary")
 
 if run_button:
     if uploaded_file is None and use_default_dataset:
-        scored_df = apply_decisions_from_pd(
-            raw_df=default_df,
-            pd_scores=default_pd_scores,
-            t_low=t_low,
-            t_high=t_high,
-        )
+        active_raw_df = default_df.copy()
+        active_pd_scores = np.array(default_pd_scores)
     else:
-        safe_input_df = sanitize_uploaded_input(input_df)
-        uploaded_pd_scores = model.predict_proba(safe_input_df)[:, 1]
-        scored_df = apply_decisions_from_pd(
-            raw_df=safe_input_df,
-            pd_scores=uploaded_pd_scores,
-            t_low=t_low,
-            t_high=t_high,
-        )
+        active_raw_df = sanitize_uploaded_input(input_df).copy()
+        active_pd_scores = model.predict_proba(active_raw_df)[:, 1]
+
+    scored_df = apply_decisions_from_pd(
+        raw_df=active_raw_df,
+        pd_scores=active_pd_scores,
+        t_low=t_low,
+        t_high=t_high,
+    )
+
+    run_summary = build_summary(scored_df)
 
     st.session_state.scored_df = scored_df
+    st.session_state.last_raw_input_df = active_raw_df
+    st.session_state.last_pd_scores = active_pd_scores
     st.session_state.last_run_info = {
         "input_name": input_name,
-        "rows_scored": len(input_df),
+        "rows_scored": len(active_raw_df),
         "t_low_used": t_low,
         "t_high_used": t_high,
         "use_frozen_thresholds": st.session_state.threshold_mode_frozen,
     }
+
+    append_run_history(
+        st.session_state,
+        st.session_state.last_run_info,
+        run_summary,
+    )
 
 if "scored_df" in st.session_state:
     scored_df = st.session_state.scored_df
@@ -880,8 +966,11 @@ if "scored_df" in st.session_state:
         with st.expander("AI explanation of this execution", expanded=False):
             st.write(execution_ai_text)
 
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "Applicant report",
+        "Run comparison",
+        "Explainability",
+        "Fairness / FEAT",
         "Scenario comparison",
         "Audit / metadata",
         "Downloads",
@@ -907,14 +996,255 @@ if "scored_df" in st.session_state:
 
         st.dataframe(display_df[available_cols], use_container_width=True, height=500)
 
+        st.markdown("### Reviewer override logging")
+
+        if not display_df.empty:
+            review_pool = display_df.copy()
+            review_pool["record_id"] = review_pool["record_id"].astype(str)
+
+            visible_options = review_pool["record_id"].head(1000).tolist()
+
+            selected_record_id = st.selectbox(
+                "Select record_id to review",
+                options=visible_options,
+                help="For prototype simplicity, the selector shows the first 1,000 visible rows."
+            )
+
+            selected_row = review_pool.loc[
+                review_pool["record_id"] == selected_record_id
+            ].iloc[0]
+
+            st.write({
+                "record_id": selected_row["record_id"],
+                "pd_score": float(selected_row["pd_score"]),
+                "current_decision": selected_row["decision"],
+            })
+
+            with st.form("reviewer_override_form", clear_on_submit=True):
+                reviewer_name = st.text_input("Reviewer name", value="analyst_demo")
+                override_decision = st.selectbox(
+                    "Override decision",
+                    options=["approve", "review", "reject"],
+                    index=["approve", "review", "reject"].index(selected_row["decision"])
+                )
+                reviewer_note = st.text_area("Reviewer note")
+
+                override_submit = st.form_submit_button("Log override")
+
+            if override_submit:
+                append_override_log(
+                    OVERRIDE_LOG_PATH,
+                    {
+                        "reviewer_name": reviewer_name.strip() or "analyst_demo",
+                        "input_name": st.session_state.last_run_info["input_name"],
+                        "record_id": selected_row["record_id"],
+                        "pd_score": float(selected_row["pd_score"]),
+                        "original_decision": selected_row["decision"],
+                        "override_decision": override_decision,
+                        "reviewer_note": reviewer_note.strip(),
+                        "t_low_used": st.session_state.last_run_info["t_low_used"],
+                        "t_high_used": st.session_state.last_run_info["t_high_used"],
+                    },
+                )
+                st.success("Reviewer override logged.")
+        else:
+            st.info("No rows available under the current decision filter.")
+
     with tab2:
+        st.subheader("Current run vs frozen benchmark")
+
+        raw_last = st.session_state.last_raw_input_df
+        pd_last = st.session_state.last_pd_scores
+
+        benchmark_scored_df = apply_decisions_from_pd(
+            raw_df=raw_last,
+            pd_scores=pd_last,
+            t_low=default_t_low,
+            t_high=default_t_high,
+        )
+        benchmark_summary = build_summary(benchmark_scored_df)
+
+        compare_df = build_comparison_table(summary, benchmark_summary)
+        st.dataframe(compare_df, use_container_width=True)
+
+        compare_chart_df = pd.DataFrame({
+            "decision": ["approve", "review", "reject"] * 2,
+            "count": [
+                summary["approve_n"], summary["review_n"], summary["reject_n"],
+                benchmark_summary["approve_n"], benchmark_summary["review_n"], benchmark_summary["reject_n"],
+            ],
+            "run": ["current"] * 3 + ["frozen_benchmark"] * 3,
+        })
+
+        fig_compare = px.bar(
+            compare_chart_df,
+            x="decision",
+            y="count",
+            color="run",
+            barmode="group",
+            title="Decision mix: current vs frozen benchmark"
+        )
+        st.plotly_chart(fig_compare, use_container_width=True)
+
+    with tab3:
+        st.subheader("Explainability")
+        st.caption(
+            "Purpose: inspect which features are driving the model's risk score globally and for an individual applicant. "
+            "These are model explanations, not causal explanations, and they should be interpreted as decision-support diagnostics."
+        )
+
+        if metadata.get("chosen_model_name") != "xgb":
+            st.info("Explainability is enabled for XGBoost-based final artifacts.")
+        else:
+            raw_last = st.session_state.last_raw_input_df.reset_index(drop=True)
+            scored_last = scored_df.reset_index(drop=True)
+
+            with st.form("explainability_form", clear_on_submit=False):
+                explain_n = st.slider(
+                    "Rows to include in explanation pack",
+                    min_value=50,
+                    max_value=min(2000, len(raw_last)),
+                    value=min(300, len(raw_last)),
+                    step=50,
+                    help="Choose how many rows to analyze when building the explanation pack."
+                )
+                explain_submit = st.form_submit_button("Compute explanation pack")
+
+            if explain_submit:
+                with st.spinner("Computing XGBoost contribution values..."):
+                    explain_raw = raw_last.head(explain_n).copy()
+                    explain_scored = scored_last.head(explain_n).copy()
+
+                    contrib_pack = make_xgb_contrib_pack(bundle["model"], explain_raw)
+
+                    st.session_state.explain_raw = explain_raw
+                    st.session_state.explain_scored = explain_scored
+                    st.session_state.contrib_pack = contrib_pack
+                    st.session_state.explain_n_used = explain_n
+
+            if "contrib_pack" in st.session_state:
+                st.caption(
+                    f"Showing explanations for the last computed pack: first {st.session_state.get('explain_n_used', 'N/A')} rows."
+                )
+
+                contrib_pack = st.session_state.contrib_pack
+                explain_scored = st.session_state.explain_scored
+
+                global_df = global_contrib_table(contrib_pack).head(15).sort_values("mean_abs_contrib")
+                fig_global = px.bar(
+                    global_df,
+                    x="mean_abs_contrib",
+                    y="feature",
+                    orientation="h",
+                    title="Top global drivers of the model risk score"
+                )
+                st.plotly_chart(fig_global, use_container_width=True)
+
+                selected_record = st.selectbox(
+                    "Select applicant for local explanation",
+                    explain_scored["record_id"].astype(str).tolist()
+                )
+
+                selected_idx = explain_scored.index[
+                    explain_scored["record_id"].astype(str) == selected_record
+                ][0]
+
+                local_df = local_contrib_table(contrib_pack, row_idx=int(selected_idx), top_n=10)
+                st.dataframe(local_df, use_container_width=True)
+
+                if st.button("Clear explanation pack"):
+                    for key in ["explain_raw", "explain_scored", "contrib_pack", "explain_n_used"]:
+                        st.session_state.pop(key, None)
+                    st.rerun()
+
+    with tab4:
+        st.subheader("Fairness / FEAT diagnostics")
+        st.caption(
+            "Purpose: review whether the current policy is producing materially different outcomes across key business segments. "
+            "This is a governance diagnostic and proxy disparity check, not a final fairness certification."
+        )
+
+        raw_last = st.session_state.last_raw_input_df
+
+        feat_table = build_feat_assessment_table(
+            raw_df=raw_last,
+            scored_df=scored_df,
+            metadata=metadata,
+            has_reason_codes="decision_reason_code" in scored_df.columns,
+            has_explanations=("contrib_pack" in st.session_state),
+            has_override_logging=OVERRIDE_LOG_PATH.exists(),
+        )
+
+        st.markdown("### FEAT-style governance view")
+        st.dataframe(feat_table, use_container_width=True)
+
+        st.markdown("### Group outcome disparity view")
+
+        fairness_control_col1, fairness_control_col2 = st.columns(2)
+
+        with fairness_control_col1:
+            min_group_size = st.slider("Minimum group size", 50, 1000, 200, 50)
+
+        with fairness_control_col2:
+            max_unique = st.slider(
+                "Maximum distinct groups shown",
+                5,
+                50,
+                20,
+                1,
+                help="Higher values allow more granular fields such as state or zip3, but may be noisier."
+            )
+
+        candidate_group_cols, fairness_table_map = precompute_fairness_tables(
+            raw_df=raw_last,
+            scored_df=scored_df,
+            min_group_size=min_group_size,
+            max_unique=max_unique,
+        )
+
+        if candidate_group_cols:
+            group_col = st.selectbox("Group column", candidate_group_cols)
+
+            group_table = fairness_table_map.get(group_col, pd.DataFrame())
+
+            if group_table.empty:
+                st.warning("No groups met the current minimum size threshold for this field.")
+            else:
+                st.dataframe(group_table, use_container_width=True)
+
+                chart_df = group_table.melt(
+                    id_vars=[group_col, "n"],
+                    value_vars=["approve_rate", "review_rate", "reject_rate"],
+                    var_name="metric",
+                    value_name="value",
+                )
+
+                fig_group = px.bar(
+                    chart_df,
+                    x=group_col,
+                    y="value",
+                    color="metric",
+                    barmode="group",
+                    hover_data=["n"],
+                    title=f"Outcome rates by {group_col}"
+                )
+                st.plotly_chart(fig_group, use_container_width=True)
+
+                st.caption(
+                    "Only low/medium-cardinality fields present in the current input are shown here. "
+                    "Increase 'Maximum distinct groups shown' to expose more granular segment fields."
+                )
+        else:
+            st.info("No suitable grouping columns were found for disparity diagnostics in the current input.")
+
+    with tab5:
         st.subheader("Top recommended scenarios")
         st.dataframe(recommendation_df, use_container_width=True, height=250)
 
         st.subheader("Full scenario grid")
         st.dataframe(scenario_grid, use_container_width=True, height=350)
 
-    with tab3:
+    with tab6:
         st.subheader("Engine metadata")
         st.json(metadata)
 
@@ -935,7 +1265,73 @@ if "scored_df" in st.session_state:
             "t_high_used": st.session_state.last_run_info["t_high_used"],
         })
 
-    with tab4:
+        st.markdown("### Input quality / drift")
+
+        raw_last = st.session_state.get("last_raw_input_df", default_df)
+        drift_report = build_drift_report(default_df, raw_last)
+
+        st.markdown("#### Schema summary")
+        st.dataframe(drift_report["schema_summary"], use_container_width=True)
+
+        ref_only_cols = drift_report["reference_only_cols"]
+        cur_only_cols = drift_report["current_only_cols"]
+
+        if ref_only_cols:
+            st.warning("Reference-only columns: " + ", ".join(ref_only_cols[:20]))
+        if cur_only_cols:
+            st.warning("Current-only columns: " + ", ".join(cur_only_cols[:20]))
+
+        st.markdown("#### Missingness change")
+        st.dataframe(
+            drift_report["missingness_table"].head(20),
+            use_container_width=True,
+            height=300
+        )
+
+        st.markdown("#### Numeric PSI")
+        psi_table = drift_report["numeric_psi_table"]
+        st.dataframe(psi_table, use_container_width=True, height=250)
+
+        if not psi_table.empty:
+            fig_psi = px.bar(
+                psi_table.sort_values("psi", ascending=True),
+                x="psi",
+                y="column",
+                color="severity",
+                orientation="h",
+                title="Numeric drift by PSI"
+            )
+            st.plotly_chart(fig_psi, use_container_width=True)
+
+        st.markdown("#### Unseen categorical values")
+        st.dataframe(
+            drift_report["unseen_category_table"],
+            use_container_width=True,
+            height=250
+        )
+
+        st.markdown("### Run history (current session)")
+        history_df = run_history_df(st.session_state)
+        st.dataframe(history_df, use_container_width=True, height=250)
+
+        if len(history_df) >= 2:
+            hist_plot_df = history_df.copy()
+            hist_plot_df["run_number"] = range(1, len(hist_plot_df) + 1)
+
+            fig_hist_runs = px.line(
+                hist_plot_df,
+                x="run_number",
+                y=["approve_rate", "review_rate", "reject_rate", "avg_pd_overall"],
+                markers=True,
+                title="Run history trends"
+            )
+            st.plotly_chart(fig_hist_runs, use_container_width=True)
+
+        st.markdown("### Reviewer override log")
+        override_log_df = load_override_log(OVERRIDE_LOG_PATH)
+        st.dataframe(override_log_df, use_container_width=True, height=250)
+
+    with tab7:
         st.subheader("Download outputs")
 
         csv_bytes = scored_df.to_csv(index=False).encode("utf-8")
@@ -953,3 +1349,34 @@ if "scored_df" in st.session_state:
             file_name="scoring_summary.json",
             mime="application/json"
         )
+
+        history_df = run_history_df(st.session_state)
+        if not history_df.empty:
+            st.download_button(
+                "Download run history CSV",
+                data=history_df.to_csv(index=False).encode("utf-8"),
+                file_name="run_history.csv",
+                mime="text/csv"
+            )
+
+        override_log_df = load_override_log(OVERRIDE_LOG_PATH)
+        if not override_log_df.empty:
+            st.download_button(
+                "Download reviewer override log CSV",
+                data=override_log_df.to_csv(index=False).encode("utf-8"),
+                file_name="reviewer_overrides.csv",
+                mime="text/csv"
+            )
+
+        raw_last = st.session_state.get("last_raw_input_df", default_df)
+        drift_report = build_drift_report(default_df, raw_last)
+
+        for table_name in ["missingness_table", "numeric_psi_table", "unseen_category_table"]:
+            df_out = drift_report.get(table_name, pd.DataFrame())
+            if not df_out.empty:
+                st.download_button(
+                    f"Download {table_name}.csv",
+                    data=df_out.to_csv(index=False).encode("utf-8"),
+                    file_name=f"{table_name}.csv",
+                    mime="text/csv"
+                )

@@ -171,65 +171,69 @@ def recommend_thresholds(
     return candidate_pool.sort_values("score", ascending=False).head(1)
 
 def diagnose_assistant_constraints(
-    grid: pd.DataFrame,
-    recommendation_df: pd.DataFrame,
-    max_review_rate: float,
-    min_approve_rate: float
-) -> dict:
-    if grid.empty:
-        return {
-            "feasible_count": 0,
-            "review_target_binding": None,
-            "approve_target_binding": None,
-            "message": "No scenario grid available."
-        }
+        grid: pd.DataFrame,
+        recommendation_df: pd.DataFrame,
+        max_review_rate: float,
+        min_approve_rate: float
+    ) -> dict:
+        if grid.empty:
+            return {
+                "feasible_count": 0,
+                "message": "No scenario grid available."
+            }
 
-    feasible = grid[
-        (grid["review_rate"] <= max_review_rate) &
-        (grid["approve_rate"] >= min_approve_rate)
-    ].copy()
+        feasible = grid[
+            (grid["review_rate"] <= max_review_rate) &
+            (grid["approve_rate"] >= min_approve_rate)
+        ].copy()
 
-    if recommendation_df.empty:
+        if recommendation_df.empty:
+            return {
+                "feasible_count": int(len(feasible)),
+                "message": "No recommendation could be generated."
+            }
+
+        top = recommendation_df.iloc[0]
+
+        top_review_rate = float(top["review_rate"])
+        top_approve_rate = float(top["approve_rate"])
+
+        review_vs_target = float(top_review_rate - max_review_rate)
+        approve_vs_target = float(top_approve_rate - min_approve_rate)
+
+        review_binding = abs(review_vs_target) < 0.03
+        approve_binding = abs(approve_vs_target) < 0.03
+
+        if len(feasible) == 0:
+            msg = (
+                "No threshold pair satisfies both targets exactly. "
+                "The assistant is showing the closest available option."
+            )
+        else:
+            msg = f"{len(feasible)} scenario(s) satisfy your current targets."
+
+        if review_vs_target <= 0:
+            review_text = f"Within max target by {abs(review_vs_target):.1%}"
+        else:
+            review_text = f"Exceeds max target by {abs(review_vs_target):.1%}"
+
+        if approve_vs_target >= 0:
+            approve_text = f"Above minimum by {abs(approve_vs_target):.1%}"
+        else:
+            approve_text = f"Below minimum by {abs(approve_vs_target):.1%}"
+
         return {
             "feasible_count": int(len(feasible)),
-            "review_target_binding": None,
-            "approve_target_binding": None,
-            "message": "No recommendation could be generated."
+            "message": msg,
+            "top_review_rate": top_review_rate,
+            "top_approve_rate": top_approve_rate,
+            "review_vs_target": review_vs_target,
+            "approve_vs_target": approve_vs_target,
+            "review_binding": review_binding,
+            "approve_binding": approve_binding,
+            "review_text": review_text,
+            "approve_text": approve_text,
         }
-
-    top = recommendation_df.iloc[0]
-
-    review_gap = float(max_review_rate - top["review_rate"])
-    approve_gap = float(top["approve_rate"] - min_approve_rate)
-
-    review_binding = review_gap < 0.03
-    approve_binding = approve_gap < 0.03
-
-    if len(feasible) == 0:
-        msg = (
-            "No candidate threshold pair satisfies both targets exactly. "
-            "The assistant is showing the closest available option."
-        )
-    else:
-        parts = [f"{len(feasible)} scenario(s) satisfy your current targets."]
-        if review_binding:
-            parts.append("The review-rate target is binding or close to binding.")
-        else:
-            parts.append("The review-rate target is not currently binding.")
-        if approve_binding:
-            parts.append("The minimum approve-rate target is binding or close to binding.")
-        else:
-            parts.append("The minimum approve-rate target is not currently binding.")
-        msg = " ".join(parts)
-
-    return {
-        "feasible_count": int(len(feasible)),
-        "review_target_binding": review_binding,
-        "approve_target_binding": approve_binding,
-        "review_gap": review_gap,
-        "approve_gap": approve_gap,
-        "message": msg,
-    }
 
 def _get_secret(name: str, default: str = "") -> str:
     try:
