@@ -853,7 +853,7 @@ if "scored_df" in st.session_state:
             line_width=2,
             line_dash="dash",
             line_color="green",
-            annotation_text=f"t_low = {t_low:.2f}",
+            annotation_text=f"low={t_low:.2f}",
             annotation_position="top left"
         )
         fig_hist.add_vline(
@@ -861,7 +861,7 @@ if "scored_df" in st.session_state:
             line_width=2,
             line_dash="dash",
             line_color="red",
-            annotation_text=f"t_high = {t_high:.2f}",
+            annotation_text=f"high={t_high:.2f}",
             annotation_position="top right"
         )
         fig_hist.add_vrect(
