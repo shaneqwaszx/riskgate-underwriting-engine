@@ -831,14 +831,50 @@ if "scored_df" in st.session_state:
         st.plotly_chart(fig_bar, use_container_width=True)
 
     with chart_col2:
-        fig_hist = px.histogram(
-            scored_df,
-            x="pd_score",
-            color="decision",
-            nbins=50,
-            title="PD score distribution by decision"
-        )
-        st.plotly_chart(fig_hist, use_container_width=True)
+    fig_hist = px.histogram(
+        scored_df,
+        x="pd_score",
+        color="decision",
+        nbins=50,
+        title="PD score distribution by decision"
+    )
+
+    fig_hist.update_layout(
+        barmode="overlay",
+        xaxis_title="PD score",
+        yaxis_title="Count",
+        legend_title="Decision"
+    )
+    fig_hist.update_traces(opacity=0.72)
+    fig_hist.update_xaxes(range=[0, 1])
+
+    fig_hist.add_vline(
+        x=t_low,
+        line_width=2,
+        line_dash="dash",
+        line_color="green",
+        annotation_text=f"t_low = {t_low:.2f}",
+        annotation_position="top left"
+    )
+    fig_hist.add_vline(
+        x=t_high,
+        line_width=2,
+        line_dash="dash",
+        line_color="red",
+        annotation_text=f"t_high = {t_high:.2f}",
+        annotation_position="top right"
+    )
+    fig_hist.add_vrect(
+        x0=t_low,
+        x1=t_high,
+        fillcolor="gold",
+        opacity=0.08,
+        line_width=0,
+        annotation_text="review band",
+        annotation_position="top"
+    )
+
+    st.plotly_chart(fig_hist, use_container_width=True)
 
     if execution_ai_text:
         with st.expander("AI explanation of this execution", expanded=False):
