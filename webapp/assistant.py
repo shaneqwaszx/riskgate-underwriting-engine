@@ -2,6 +2,65 @@ import numpy as np
 import pandas as pd
 import requests
 
+CUSTOM_PROFILE_NAME = "Custom target-driven"
+
+PROFILE_SETTINGS = {
+    "Balanced": {
+        "scoring_goal": "Balanced",
+        "max_review_rate": 0.20,
+        "min_approve_rate": 0.50,
+    },
+    "Growth": {
+        "scoring_goal": "Growth",
+        "max_review_rate": 0.25,
+        "min_approve_rate": 0.60,
+    },
+    "Conservative": {
+        "scoring_goal": "Conservative",
+        "max_review_rate": 0.15,
+        "min_approve_rate": 0.40,
+    },
+    "Operations-first": {
+        "scoring_goal": "Operations-first",
+        "max_review_rate": 0.12,
+        "min_approve_rate": 0.45,
+    },
+}
+
+
+def get_assistant_profile_settings(
+    profile_name: str,
+    user_max_review_rate: float,
+    user_min_approve_rate: float,
+) -> dict:
+    """
+    Returns the effective assistant settings.
+
+    - Fixed profiles ignore the user sliders and use built-in targets.
+    - Custom target-driven is the only profile that uses the sliders.
+    """
+    if profile_name == CUSTOM_PROFILE_NAME:
+        return {
+            "profile_name": CUSTOM_PROFILE_NAME,
+            "scoring_goal": "Balanced",
+            "max_review_rate": float(user_max_review_rate),
+            "min_approve_rate": float(user_min_approve_rate),
+            "uses_user_targets": True,
+            "mode_label": "User-defined custom targets",
+        }
+
+    if profile_name not in PROFILE_SETTINGS:
+        raise ValueError(f"Unknown profile: {profile_name}")
+
+    spec = PROFILE_SETTINGS[profile_name]
+    return {
+        "profile_name": profile_name,
+        "scoring_goal": spec["scoring_goal"],
+        "max_review_rate": float(spec["max_review_rate"]),
+        "min_approve_rate": float(spec["min_approve_rate"]),
+        "uses_user_targets": False,
+        "mode_label": "Fixed profile assumptions",
+    }
 
 def assign_decision(pd_scores: np.ndarray, t_low: float, t_high: float) -> np.ndarray:
     return np.where(
@@ -86,39 +145,15 @@ def recommend_thresholds(
     goal: str,
     max_review_rate: float = 0.20,
     min_approve_rate: float = 0.50,
-    frozen_t_low: float | None = None,
-    frozen_t_high: float | None = None,
 ) -> pd.DataFrame:
     g = grid.copy()
 
-    # helper features used by the composite scoring formulas
     g["review_proximity"] = 1.0 - (g["review_rate"] - max_review_rate).abs()
     g["approve_proximity"] = 1.0 - (g["approve_rate"] - min_approve_rate).abs()
     g["constraint_penalty"] = (
         np.maximum(g["review_rate"] - max_review_rate, 0.0) +
         np.maximum(min_approve_rate - g["approve_rate"], 0.0)
     )
-
-    if goal == "Frozen benchmark":
-        if frozen_t_low is None or frozen_t_high is None:
-            raise ValueError("Frozen benchmark requested but frozen thresholds were not provided.")
-
-        mask = (
-            np.isclose(g["t_low"], frozen_t_low) &
-            np.isclose(g["t_high"], frozen_t_high)
-        )
-
-        if not mask.any():
-            raise ValueError(
-                f"Frozen threshold pair (t_low={frozen_t_low}, t_high={frozen_t_high}) "
-                "was not found in the scenario grid."
-            )
-
-        out = g.loc[mask].copy()
-        out["goal"] = "Frozen benchmark"
-        out["score"] = np.nan
-        out["selection_reason"] = "Fixed deployed production pair"
-        return out.head(1)
 
     feasible = g[
         (g["review_rate"] <= max_review_rate) &
@@ -206,11 +241,11 @@ def diagnose_assistant_constraints(
 
         if len(feasible) == 0:
             msg = (
-                "No threshold pair satisfies both targets exactly. "
+                "No threshold pair satisfies the current effective targets exactly. "
                 "The assistant is showing the closest available option."
             )
         else:
-            msg = f"{len(feasible)} scenario(s) satisfy your current targets."
+            msg = f"{len(feasible)} scenario(s) satisfy the current effective targets."
 
         if review_vs_target <= 0:
             review_text = f"Within max target by {abs(review_vs_target):.1%}"

@@ -26,6 +26,9 @@ from webapp.assistant import (
     recommend_thresholds,
     diagnose_assistant_constraints,
     ollama_explanation,
+    CUSTOM_PROFILE_NAME,
+    PROFILE_SETTINGS,
+    get_assistant_profile_settings,
 )
 
 import io
@@ -498,7 +501,7 @@ st.caption(f"Build: {APP_BUILD}")
 # Sidebar assistant
 # --------------------------------------------------
 if "assistant_goal" not in st.session_state:
-    st.session_state.assistant_goal = "Frozen benchmark"
+    st.session_state.assistant_goal = "Balanced"
 if "assistant_max_review_rate" not in st.session_state:
     st.session_state.assistant_max_review_rate = 0.20
 if "assistant_min_approve_rate" not in st.session_state:
@@ -516,30 +519,45 @@ with st.sidebar:
 
     with st.form("assistant_form", clear_on_submit=False):
         goal_options = [
-            "Frozen benchmark",
+            
             "Balanced",
             "Growth",
             "Conservative",
             "Operations-first",
+            CUSTOM_PROFILE_NAME,
         ]
 
         goal_draft = st.selectbox(
             "Preferred business goal",
             goal_options,
             index=goal_options.index(st.session_state.assistant_goal),
-            help="Select either the fixed deployed benchmark or an optimized business objective."
+            help="Fixed profiles use built-in operating assumptions. Only Custom target-driven uses the sliders below."
         )
+
+        is_custom_profile = (goal_draft == CUSTOM_PROFILE_NAME)
+
+        if not is_custom_profile:
+            fixed_spec = PROFILE_SETTINGS[goal_draft]
+            st.info(
+                f"{goal_draft} uses fixed targets: "
+                f"max review {fixed_spec['max_review_rate']:.0%}, "
+                f"min approve {fixed_spec['min_approve_rate']:.0%}."
+            )
+        else:
+            st.caption("This is the only profile that uses the target sliders below.")
 
         max_review_rate_draft = st.slider(
             "Maximum review rate target",
             0.05, 0.50, float(st.session_state.assistant_max_review_rate), 0.01,
-            help="Maximum acceptable proportion of applications routed to manual review."
+            help="Used only when the profile is Custom target-driven.",
+            disabled=not is_custom_profile,
         )
 
         min_approve_rate_draft = st.slider(
             "Minimum approve rate target",
             0.20, 0.90, float(st.session_state.assistant_min_approve_rate), 0.01,
-            help="Minimum desired auto-approval proportion."
+            help="Used only when the profile is Custom target-driven.",
+            disabled=not is_custom_profile,
         )
 
         use_ollama_draft = st.checkbox(
@@ -550,11 +568,11 @@ with st.sidebar:
 
         assistant_submit = st.form_submit_button("Update policy assistant")
 
-    if assistant_submit:
-        st.session_state.assistant_goal = goal_draft
-        st.session_state.assistant_max_review_rate = max_review_rate_draft
-        st.session_state.assistant_min_approve_rate = min_approve_rate_draft
-        st.session_state.assistant_use_ollama = use_ollama_draft
+        if assistant_submit:
+            st.session_state.assistant_goal = goal_draft
+            st.session_state.assistant_max_review_rate = max_review_rate_draft
+            st.session_state.assistant_min_approve_rate = min_approve_rate_draft
+            st.session_state.assistant_use_ollama = use_ollama_draft
 
     def _get_secret(name: str, default: str = "") -> str:
         try:
@@ -568,46 +586,77 @@ with st.sidebar:
         help="Hosted Ollama model name."
     )
 
-goal = st.session_state.assistant_goal
-max_review_rate = st.session_state.assistant_max_review_rate
-min_approve_rate = st.session_state.assistant_min_approve_rate
+selected_profile = st.session_state.assistant_goal
+user_max_review_rate = st.session_state.assistant_max_review_rate
+user_min_approve_rate = st.session_state.assistant_min_approve_rate
 use_ollama = st.session_state.assistant_use_ollama
 
+assistant_profile = get_assistant_profile_settings(
+    profile_name=selected_profile,
+    user_max_review_rate=user_max_review_rate,
+    user_min_approve_rate=user_min_approve_rate,
+)
+
+effective_goal = assistant_profile["scoring_goal"]
+effective_max_review_rate = assistant_profile["max_review_rate"]
+effective_min_approve_rate = assistant_profile["min_approve_rate"]
+uses_user_targets = assistant_profile["uses_user_targets"]
 
 recommendation_df = recommend_thresholds(
     grid=scenario_grid,
-    goal=goal,
-    max_review_rate=max_review_rate,
-    min_approve_rate=min_approve_rate,
-    frozen_t_low=float(frozen_thresholds["t_low"]),
-    frozen_t_high=float(frozen_thresholds["t_high"]),
+    goal=effective_goal,
+    max_review_rate=effective_max_review_rate,
+    min_approve_rate=effective_min_approve_rate,
 )
 
 assistant_diag = diagnose_assistant_constraints(
     grid=scenario_grid,
     recommendation_df=recommendation_df,
-    max_review_rate=max_review_rate,
-    min_approve_rate=min_approve_rate,
+    max_review_rate=effective_max_review_rate,
+    min_approve_rate=effective_min_approve_rate,
 )
 
 ai_text = None
 if use_ollama:
     prompt = f"""
-You are helping an underwriting analyst choose thresholds for a triage policy.
-Business goal: {goal}
-Max review rate target: {max_review_rate:.2f}
-Min approve rate target: {min_approve_rate:.2f}
+    You are helping an underwriting analyst choose thresholds for a triage policy.
 
-Top candidate threshold pairs:
-{recommendation_df.to_string(index=False)}
+    Selected profile: {selected_profile}
+    Profile mode: {"User-defined custom targets" if uses_user_targets else "Fixed profile assumptions"}
+    Effective scoring goal: {effective_goal}
+    Effective max review rate target: {effective_max_review_rate:.2f}
+    Effective min approve rate target: {effective_min_approve_rate:.2f}
 
-Provide a short practical recommendation in plain English.
-"""
+    Top candidate threshold pairs:
+    {recommendation_df.to_string(index=False)}
+
+    Provide a short practical recommendation in plain English.
+    """
     ai_text = ollama_explanation(prompt, model_name=ollama_model_name)
 
 with st.sidebar:
     with st.container(border=True):
+        st.caption("CURRENT DEPLOYED BENCHMARK")
+        st.write(
+            f"t_low = {float(frozen_thresholds['t_low']):.2f}, "
+            f"t_high = {float(frozen_thresholds['t_high']):.2f}"
+        )
+        st.caption(
+            "This is the saved benchmark pair from the final model bundle. "
+            "It is shown for reference only and is no longer a selectable assistant profile."
+        )
+    with st.container(border=True):
         st.caption("ASSISTANT DIAGNOSTICS")
+
+        if uses_user_targets:
+            st.caption("Mode: Custom target-driven — using your slider targets.")
+        else:
+            st.caption(
+                f"Mode: {selected_profile} — fixed targets applied "
+                f"(max review {effective_max_review_rate:.0%}, "
+                f"min approve {effective_min_approve_rate:.0%})."
+            )
+
         st.write(assistant_diag["message"])
 
         if "top_review_rate" in assistant_diag:
@@ -634,34 +683,38 @@ with st.sidebar:
         st.rerun()
 
     with st.expander("Explain the business goals", expanded=False):
-        st.markdown("""
-                    **Frozen benchmark**  
-                    Uses the currently deployed production thresholds stored in the final model bundle. This acts as a fixed benchmark for comparison.
+        st.markdown(f"""
+        **Balanced**  
+        Uses fixed targets of **max review 20%** and **min approve 50%**. It tries to maintain a healthy approval rate while penalizing excessive retained risk and avoiding review overload.
 
-                    **Balanced**  
-                    Tries to maintain a healthy approval rate while penalizing excessive retained risk and avoiding review overload.
+        **Growth**  
+        Uses fixed targets of **max review 25%** and **min approve 60%**. It favours higher approvals and conversion while still penalizing retained risk.
 
-                    **Growth**  
-                    Favours higher approvals and conversion, while still applying a lighter penalty to retained risk.
+        **Conservative**  
+        Uses fixed targets of **max review 15%** and **min approve 40%**. It prioritizes lower retained risk even if approval volume falls.
 
-                    **Conservative**  
-                    Prioritizes lower retained risk in the non-rejected pool, even if approval volume falls.
+        **Operations-first**  
+        Uses fixed targets of **max review 12%** and **min approve 45%**. It prioritizes a smaller review queue so the underwriting team can manage workload more easily.
 
-                    **Operations-first**  
-                    Prioritizes a smaller review queue so the underwriting team can manage workload more easily.
-                    """)
+        **{CUSTOM_PROFILE_NAME}**  
+        This is the only profile that uses the sliders above. It lets the user set custom review and approval targets directly.
+        """)
 
     with st.expander("How the policy assistant derives recommendations", expanded=False):
         st.markdown("""
-The assistant evaluates many threshold pairs (`t_low`, `t_high`) and estimates their impact on:
-- approval rate
-- review rate
-- reject rate
-- average PD in each decision bucket
-- retained risk proxy in the non-rejected population
+        The assistant evaluates many threshold pairs (`t_low`, `t_high`) and estimates their impact on:
+        - approval rate
+        - review rate
+        - reject rate
+        - average PD in each decision bucket
+        - retained risk proxy in the non-rejected population
 
-It then ranks threshold pairs according to the selected business goal and the operational constraints set on the page.
-""")
+        For **Balanced, Growth, Conservative, and Operations-first**, the assistant uses built-in profile targets.
+
+        For **Custom target-driven**, the assistant uses the review and approval targets set by the user on this page.
+
+        The deployed benchmark pair is shown separately for reference and is not treated as a recommendation profile.
+        """)
 
     with st.expander("Top threshold scenarios", expanded=False):
         st.dataframe(recommendation_df, use_container_width=True, height=220)
