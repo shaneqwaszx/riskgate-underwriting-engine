@@ -7,60 +7,77 @@ CUSTOM_PROFILE_NAME = "Custom target-driven"
 PROFILE_SETTINGS = {
     "Balanced": {
         "scoring_goal": "Balanced",
-        "max_review_rate": 0.20,
-        "min_approve_rate": 0.50,
+        "review_band": (0.08, 0.20),
+        "approve_band": (0.45, 0.60),
     },
     "Growth": {
         "scoring_goal": "Growth",
-        "max_review_rate": 0.25,
-        "min_approve_rate": 0.60,
+        "review_band": (0.08, 0.25),
+        "approve_band": (0.60, 0.80),
     },
     "Conservative": {
         "scoring_goal": "Conservative",
-        "max_review_rate": 0.15,
-        "min_approve_rate": 0.40,
+        "review_band": (0.05, 0.15),
+        "approve_band": (0.35, 0.55),
     },
     "Operations-first": {
         "scoring_goal": "Operations-first",
-        "max_review_rate": 0.12,
-        "min_approve_rate": 0.45,
+        "review_band": (0.03, 0.12),
+        "approve_band": (0.40, 0.60),
     },
 }
 
 
 def get_assistant_profile_settings(
     profile_name: str,
-    user_max_review_rate: float,
-    user_min_approve_rate: float,
+    user_review_band: tuple[float, float],
+    user_approve_band: tuple[float, float],
 ) -> dict:
     """
-    Returns the effective assistant settings.
-
-    - Fixed profiles ignore the user sliders and use built-in targets.
-    - Custom target-driven is the only profile that uses the sliders.
+    Fixed profiles ignore the user's target bands.
+    Only Custom target-driven uses the user-selected ranges.
     """
     if profile_name == CUSTOM_PROFILE_NAME:
+        review_min, review_max = sorted([float(user_review_band[0]), float(user_review_band[1])])
+        approve_min, approve_max = sorted([float(user_approve_band[0]), float(user_approve_band[1])])
+
         return {
             "profile_name": CUSTOM_PROFILE_NAME,
             "scoring_goal": "Balanced",
-            "max_review_rate": float(user_max_review_rate),
-            "min_approve_rate": float(user_min_approve_rate),
+            "min_review_rate": review_min,
+            "max_review_rate": review_max,
+            "min_approve_rate": approve_min,
+            "max_approve_rate": approve_max,
             "uses_user_targets": True,
-            "mode_label": "User-defined custom targets",
+            "mode_label": "User-defined target bands",
         }
 
     if profile_name not in PROFILE_SETTINGS:
         raise ValueError(f"Unknown profile: {profile_name}")
 
     spec = PROFILE_SETTINGS[profile_name]
+    review_min, review_max = spec["review_band"]
+    approve_min, approve_max = spec["approve_band"]
+
     return {
         "profile_name": profile_name,
         "scoring_goal": spec["scoring_goal"],
-        "max_review_rate": float(spec["max_review_rate"]),
-        "min_approve_rate": float(spec["min_approve_rate"]),
+        "min_review_rate": float(review_min),
+        "max_review_rate": float(review_max),
+        "min_approve_rate": float(approve_min),
+        "max_approve_rate": float(approve_max),
         "uses_user_targets": False,
-        "mode_label": "Fixed profile assumptions",
+        "mode_label": "Fixed profile target bands",
     }
+
+def _band_penalty(x: pd.Series, lower: float, upper: float) -> pd.Series:
+    return np.maximum(lower - x, 0.0) + np.maximum(x - upper, 0.0)
+
+
+def _band_proximity(x: pd.Series, lower: float, upper: float) -> pd.Series:
+    mid = (lower + upper) / 2.0
+    half_width = max((upper - lower) / 2.0, 1e-6)
+    return np.clip(1.0 - (np.abs(x - mid) / half_width), 0.0, 1.0)
 
 def assign_decision(pd_scores: np.ndarray, t_low: float, t_high: float) -> np.ndarray:
     return np.where(
@@ -143,21 +160,26 @@ def build_scenario_grid_from_scores(
 def recommend_thresholds(
     grid: pd.DataFrame,
     goal: str,
+    min_review_rate: float = 0.05,
     max_review_rate: float = 0.20,
     min_approve_rate: float = 0.50,
+    max_approve_rate: float = 0.70,
 ) -> pd.DataFrame:
     g = grid.copy()
 
-    g["review_proximity"] = 1.0 - (g["review_rate"] - max_review_rate).abs()
-    g["approve_proximity"] = 1.0 - (g["approve_rate"] - min_approve_rate).abs()
+    g["review_proximity"] = _band_proximity(g["review_rate"], min_review_rate, max_review_rate)
+    g["approve_proximity"] = _band_proximity(g["approve_rate"], min_approve_rate, max_approve_rate)
+
     g["constraint_penalty"] = (
-        np.maximum(g["review_rate"] - max_review_rate, 0.0) +
-        np.maximum(min_approve_rate - g["approve_rate"], 0.0)
+        _band_penalty(g["review_rate"], min_review_rate, max_review_rate) +
+        _band_penalty(g["approve_rate"], min_approve_rate, max_approve_rate)
     )
 
     feasible = g[
+        (g["review_rate"] >= min_review_rate) &
         (g["review_rate"] <= max_review_rate) &
-        (g["approve_rate"] >= min_approve_rate)
+        (g["approve_rate"] >= min_approve_rate) &
+        (g["approve_rate"] <= max_approve_rate)
     ].copy()
 
     candidate_pool = feasible if not feasible.empty else g.copy()
@@ -206,69 +228,58 @@ def recommend_thresholds(
     return candidate_pool.sort_values("score", ascending=False).head(1)
 
 def diagnose_assistant_constraints(
-        grid: pd.DataFrame,
-        recommendation_df: pd.DataFrame,
-        max_review_rate: float,
-        min_approve_rate: float
-    ) -> dict:
-        if grid.empty:
-            return {
-                "feasible_count": 0,
-                "message": "No scenario grid available."
-            }
+    grid: pd.DataFrame,
+    recommendation_df: pd.DataFrame,
+    min_review_rate: float,
+    max_review_rate: float,
+    min_approve_rate: float,
+    max_approve_rate: float,
+) -> dict:
+    if grid.empty:
+        return {
+            "feasible_count": 0,
+            "message": "No scenario grid available."
+        }
 
-        feasible = grid[
-            (grid["review_rate"] <= max_review_rate) &
-            (grid["approve_rate"] >= min_approve_rate)
-        ].copy()
+    feasible = grid[
+        (grid["review_rate"] >= min_review_rate) &
+        (grid["review_rate"] <= max_review_rate) &
+        (grid["approve_rate"] >= min_approve_rate) &
+        (grid["approve_rate"] <= max_approve_rate)
+    ].copy()
 
-        if recommendation_df.empty:
-            return {
-                "feasible_count": int(len(feasible)),
-                "message": "No recommendation could be generated."
-            }
-
-        top = recommendation_df.iloc[0]
-
-        top_review_rate = float(top["review_rate"])
-        top_approve_rate = float(top["approve_rate"])
-
-        review_vs_target = float(top_review_rate - max_review_rate)
-        approve_vs_target = float(top_approve_rate - min_approve_rate)
-
-        review_binding = abs(review_vs_target) < 0.03
-        approve_binding = abs(approve_vs_target) < 0.03
-
-        if len(feasible) == 0:
-            msg = (
-                "No threshold pair satisfies the current effective targets exactly. "
-                "The assistant is showing the closest available option."
-            )
-        else:
-            msg = f"{len(feasible)} scenario(s) satisfy the current effective targets."
-
-        if review_vs_target <= 0:
-            review_text = f"Within max target by {abs(review_vs_target):.1%}"
-        else:
-            review_text = f"Exceeds max target by {abs(review_vs_target):.1%}"
-
-        if approve_vs_target >= 0:
-            approve_text = f"Above minimum by {abs(approve_vs_target):.1%}"
-        else:
-            approve_text = f"Below minimum by {abs(approve_vs_target):.1%}"
-
+    if recommendation_df.empty:
         return {
             "feasible_count": int(len(feasible)),
-            "message": msg,
-            "top_review_rate": top_review_rate,
-            "top_approve_rate": top_approve_rate,
-            "review_vs_target": review_vs_target,
-            "approve_vs_target": approve_vs_target,
-            "review_binding": review_binding,
-            "approve_binding": approve_binding,
-            "review_text": review_text,
-            "approve_text": approve_text,
+            "message": "No recommendation could be generated."
         }
+
+    top = recommendation_df.iloc[0]
+
+    top_review_rate = float(top["review_rate"])
+    top_approve_rate = float(top["approve_rate"])
+
+    review_within = min_review_rate <= top_review_rate <= max_review_rate
+    approve_within = min_approve_rate <= top_approve_rate <= max_approve_rate
+
+    if len(feasible) == 0:
+        msg = (
+            "No threshold pair satisfies the current effective target bands exactly. "
+            "The assistant is showing the closest available option."
+        )
+    else:
+        msg = f"{len(feasible)} scenario(s) satisfy the current effective target bands."
+
+    return {
+        "feasible_count": int(len(feasible)),
+        "message": msg,
+        "top_review_rate": top_review_rate,
+        "top_approve_rate": top_approve_rate,
+        "review_within": review_within,
+        "approve_within": approve_within,
+        "review_band_text": f"{top_review_rate:.1%} vs target band {min_review_rate:.1%}–{max_review_rate:.1%}",
+        "approve_band_text": f"{top_approve_rate:.1%} vs target band {min_approve_rate:.1%}–{max_approve_rate:.1%}",
+    }
 
 def _get_secret(name: str, default: str = "") -> str:
     try:

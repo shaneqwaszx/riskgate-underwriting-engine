@@ -502,12 +502,21 @@ st.caption(f"Build: {APP_BUILD}")
 # --------------------------------------------------
 if "assistant_goal" not in st.session_state:
     st.session_state.assistant_goal = "Balanced"
-if "assistant_max_review_rate" not in st.session_state:
-    st.session_state.assistant_max_review_rate = 0.20
-if "assistant_min_approve_rate" not in st.session_state:
-    st.session_state.assistant_min_approve_rate = 0.50
+
+if "assistant_review_band" not in st.session_state:
+    st.session_state.assistant_review_band = (0.05, 0.20)
+
+if "assistant_approve_band" not in st.session_state:
+    st.session_state.assistant_approve_band = (0.50, 0.70)
+
 if "assistant_use_ollama" not in st.session_state:
-    st.session_state.assistant_use_ollama = False
+    st.session_state.assistant_use_ollama = True
+
+if "assistant_ai_text" not in st.session_state:
+    st.session_state.assistant_ai_text = None
+
+if "assistant_ai_signature" not in st.session_state:
+    st.session_state.assistant_ai_signature = None
 
 
 with st.sidebar:
@@ -517,62 +526,66 @@ with st.sidebar:
         unsafe_allow_html=True
     )
 
-    with st.form("assistant_form", clear_on_submit=False):
-        goal_options = [
-            
-            "Balanced",
-            "Growth",
-            "Conservative",
-            "Operations-first",
-            CUSTOM_PROFILE_NAME,
-        ]
+    goal_options = [
+        "Balanced",
+        "Growth",
+        "Conservative",
+        "Operations-first",
+        CUSTOM_PROFILE_NAME,
+    ]
 
-        goal_draft = st.selectbox(
-            "Preferred business goal",
-            goal_options,
-            index=goal_options.index(st.session_state.assistant_goal),
-            help="Fixed profiles use built-in operating assumptions. Only Custom target-driven uses the sliders below."
+    selected_profile = st.selectbox(
+        "Preferred business goal",
+        goal_options,
+        key="assistant_goal",
+        help="Fixed profiles use built-in target bands. Only Custom target-driven uses the sliders below."
+    )
+
+    is_custom_profile = (selected_profile == CUSTOM_PROFILE_NAME)
+
+    if not is_custom_profile:
+        fixed_spec = PROFILE_SETTINGS[selected_profile]
+        review_low, review_high = fixed_spec["review_band"]
+        approve_low, approve_high = fixed_spec["approve_band"]
+
+        st.info(
+            f"{selected_profile} uses fixed target bands:\n\n"
+            f"- Review rate: {review_low:.0%} to {review_high:.0%}\n"
+            f"- Approve rate: {approve_low:.0%} to {approve_high:.0%}"
         )
+    else:
+        st.caption("This is the only profile that uses the target bands below.")
 
-        is_custom_profile = (goal_draft == CUSTOM_PROFILE_NAME)
+    review_band = st.slider(
+        "Review rate target band",
+        0.00, 0.50,
+        value=st.session_state.assistant_review_band,
+        step=0.01,
+        disabled=not is_custom_profile,
+        key="assistant_review_band",
+        help="Used only when the profile is Custom target-driven."
+    )
 
-        if not is_custom_profile:
-            fixed_spec = PROFILE_SETTINGS[goal_draft]
-            st.info(
-                f"{goal_draft} uses fixed targets: "
-                f"max review {fixed_spec['max_review_rate']:.0%}, "
-                f"min approve {fixed_spec['min_approve_rate']:.0%}."
-            )
-        else:
-            st.caption("This is the only profile that uses the target sliders below.")
+    approve_band = st.slider(
+        "Approve rate target band",
+        0.00, 0.90,
+        value=st.session_state.assistant_approve_band,
+        step=0.01,
+        disabled=not is_custom_profile,
+        key="assistant_approve_band",
+        help="Used only when the profile is Custom target-driven."
+    )
 
-        max_review_rate_draft = st.slider(
-            "Maximum review rate target",
-            0.05, 0.50, float(st.session_state.assistant_max_review_rate), 0.01,
-            help="Used only when the profile is Custom target-driven.",
-            disabled=not is_custom_profile,
-        )
+    use_ollama = st.checkbox(
+        "Use Ollama Cloud explanation",
+        key="assistant_use_ollama",
+        help="The assistant recommendation updates automatically. The AI explanation refreshes only when you click the button below."
+    )
 
-        min_approve_rate_draft = st.slider(
-            "Minimum approve rate target",
-            0.20, 0.90, float(st.session_state.assistant_min_approve_rate), 0.01,
-            help="Used only when the profile is Custom target-driven.",
-            disabled=not is_custom_profile,
-        )
-
-        use_ollama_draft = st.checkbox(
-            "Use Ollama Cloud explanation",
-            value=st.session_state.assistant_use_ollama,
-            help="Optional advisory AI explanation using Ollama's hosted API."
-        )
-
-        assistant_submit = st.form_submit_button("Update policy assistant")
-
-        if assistant_submit:
-            st.session_state.assistant_goal = goal_draft
-            st.session_state.assistant_max_review_rate = max_review_rate_draft
-            st.session_state.assistant_min_approve_rate = min_approve_rate_draft
-            st.session_state.assistant_use_ollama = use_ollama_draft
+    refresh_ai_explanation = st.button(
+        "Refresh AI explanation",
+        disabled=not st.session_state.assistant_use_ollama,
+    )
 
     def _get_secret(name: str, default: str = "") -> str:
         try:
@@ -587,52 +600,74 @@ with st.sidebar:
     )
 
 selected_profile = st.session_state.assistant_goal
-user_max_review_rate = st.session_state.assistant_max_review_rate
-user_min_approve_rate = st.session_state.assistant_min_approve_rate
+user_review_band = st.session_state.assistant_review_band
+user_approve_band = st.session_state.assistant_approve_band
 use_ollama = st.session_state.assistant_use_ollama
 
 assistant_profile = get_assistant_profile_settings(
     profile_name=selected_profile,
-    user_max_review_rate=user_max_review_rate,
-    user_min_approve_rate=user_min_approve_rate,
+    user_review_band=user_review_band,
+    user_approve_band=user_approve_band,
 )
 
 effective_goal = assistant_profile["scoring_goal"]
+effective_min_review_rate = assistant_profile["min_review_rate"]
 effective_max_review_rate = assistant_profile["max_review_rate"]
 effective_min_approve_rate = assistant_profile["min_approve_rate"]
+effective_max_approve_rate = assistant_profile["max_approve_rate"]
 uses_user_targets = assistant_profile["uses_user_targets"]
 
 recommendation_df = recommend_thresholds(
     grid=scenario_grid,
     goal=effective_goal,
+    min_review_rate=effective_min_review_rate,
     max_review_rate=effective_max_review_rate,
     min_approve_rate=effective_min_approve_rate,
+    max_approve_rate=effective_max_approve_rate,
 )
 
 assistant_diag = diagnose_assistant_constraints(
     grid=scenario_grid,
     recommendation_df=recommendation_df,
+    min_review_rate=effective_min_review_rate,
     max_review_rate=effective_max_review_rate,
     min_approve_rate=effective_min_approve_rate,
+    max_approve_rate=effective_max_approve_rate,
 )
 
-ai_text = None
-if use_ollama:
+current_ai_signature = (
+    selected_profile,
+    effective_goal,
+    round(effective_min_review_rate, 4),
+    round(effective_max_review_rate, 4),
+    round(effective_min_approve_rate, 4),
+    round(effective_max_approve_rate, 4),
+    ollama_model_name,
+)
+
+if not use_ollama:
+    st.session_state.assistant_ai_text = None
+    st.session_state.assistant_ai_signature = None
+
+elif refresh_ai_explanation or st.session_state.assistant_ai_text is None:
     prompt = f"""
     You are helping an underwriting analyst choose thresholds for a triage policy.
 
     Selected profile: {selected_profile}
-    Profile mode: {"User-defined custom targets" if uses_user_targets else "Fixed profile assumptions"}
+    Profile mode: {"User-defined target bands" if uses_user_targets else "Fixed profile target bands"}
     Effective scoring goal: {effective_goal}
-    Effective max review rate target: {effective_max_review_rate:.2f}
-    Effective min approve rate target: {effective_min_approve_rate:.2f}
+    Effective review rate target band: {effective_min_review_rate:.2f} to {effective_max_review_rate:.2f}
+    Effective approve rate target band: {effective_min_approve_rate:.2f} to {effective_max_approve_rate:.2f}
 
     Top candidate threshold pairs:
     {recommendation_df.to_string(index=False)}
 
     Provide a short practical recommendation in plain English.
     """
-    ai_text = ollama_explanation(prompt, model_name=ollama_model_name)
+    st.session_state.assistant_ai_text = ollama_explanation(prompt, model_name=ollama_model_name)
+    st.session_state.assistant_ai_signature = current_ai_signature
+
+    ai_text = st.session_state.assistant_ai_text
 
 with st.sidebar:
     with st.container(border=True):
@@ -649,34 +684,20 @@ with st.sidebar:
         st.caption("ASSISTANT DIAGNOSTICS")
 
         if uses_user_targets:
-            st.caption("Mode: Custom target-driven — using your slider targets.")
+            st.caption("Mode: Custom target-driven — using your target bands.")
         else:
             st.caption(
-                f"Mode: {selected_profile} — fixed targets applied "
-                f"(max review {effective_max_review_rate:.0%}, "
-                f"min approve {effective_min_approve_rate:.0%})."
+                f"Mode: {selected_profile} — fixed target bands applied."
             )
 
         st.write(assistant_diag["message"])
 
-        if "top_review_rate" in assistant_diag:
-            c1, c2 = st.columns(2)
+        c1, c2 = st.columns(2)
+        c1.metric("Review rate", f"{assistant_diag['top_review_rate']:.1%}")
+        c2.metric("Approve rate", f"{assistant_diag['top_approve_rate']:.1%}")
 
-            c1.metric(
-                "Review rate",
-                f"{assistant_diag['top_review_rate']:.1%}",
-                delta=f"{assistant_diag['review_vs_target']:+.1%} vs max"
-            )
-
-            c2.metric(
-                "Approve rate",
-                f"{assistant_diag['top_approve_rate']:.1%}",
-                delta=f"{assistant_diag['approve_vs_target']:+.1%} vs minimum"
-            )
-
-            st.caption(
-                f"Interpretation: {assistant_diag['review_text']}. {assistant_diag['approve_text']}."
-            )
+        st.caption(f"Review: {assistant_diag['review_band_text']}")
+        st.caption(f"Approve: {assistant_diag['approve_band_text']}")
 
     if st.button("Apply recommended thresholds", use_container_width=True):
         apply_top_recommendation(recommendation_df)
@@ -684,21 +705,29 @@ with st.sidebar:
 
     with st.expander("Explain the business goals", expanded=False):
         st.markdown(f"""
-        **Balanced**  
-        Uses fixed targets of **max review 20%** and **min approve 50%**. It tries to maintain a healthy approval rate while penalizing excessive retained risk and avoiding review overload.
+            **Balanced**  
+            Uses fixed target bands:
+            - Review rate: 8% to 20%
+            - Approve rate: 45% to 60%
 
-        **Growth**  
-        Uses fixed targets of **max review 25%** and **min approve 60%**. It favours higher approvals and conversion while still penalizing retained risk.
+            **Growth**  
+            Uses fixed target bands:
+            - Review rate: 8% to 25%
+            - Approve rate: 60% to 80%
 
-        **Conservative**  
-        Uses fixed targets of **max review 15%** and **min approve 40%**. It prioritizes lower retained risk even if approval volume falls.
+            **Conservative**  
+            Uses fixed target bands:
+            - Review rate: 5% to 15%
+            - Approve rate: 35% to 55%
 
-        **Operations-first**  
-        Uses fixed targets of **max review 12%** and **min approve 45%**. It prioritizes a smaller review queue so the underwriting team can manage workload more easily.
+            **Operations-first**  
+            Uses fixed target bands:
+            - Review rate: 3% to 12%
+            - Approve rate: 40% to 60%
 
-        **{CUSTOM_PROFILE_NAME}**  
-        This is the only profile that uses the sliders above. It lets the user set custom review and approval targets directly.
-        """)
+            **{CUSTOM_PROFILE_NAME}**  
+            This is the only profile that uses the target bands selected by the user.
+            """)
 
     with st.expander("How the policy assistant derives recommendations", expanded=False):
         st.markdown("""
@@ -719,8 +748,7 @@ with st.sidebar:
     with st.expander("Top threshold scenarios", expanded=False):
         st.dataframe(recommendation_df, use_container_width=True, height=220)
 
-    if ai_text:
-        st.info(ai_text)
+
 
 # --------------------------------------------------
 # Threshold controls
