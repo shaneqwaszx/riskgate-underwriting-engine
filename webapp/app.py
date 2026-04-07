@@ -807,8 +807,21 @@ The uploaded file should contain one row per applicant.
     else:
         st.warning("upload_template.csv was not found in data/scored/.")
 
-uploaded_file = st.file_uploader("Upload a raw applications CSV", type=["csv"])
-use_default_dataset = st.checkbox("Use default scoring dataset", value=True)
+input_mode = st.radio(
+    "Choose input source",
+    ["Default scoring dataset", "Upload CSV"],
+    key="riskgate_input_mode",
+)
+
+uploaded_file = None
+if input_mode == "Upload CSV":
+    uploaded_file = st.file_uploader(
+        "Upload a raw applications CSV",
+        type=["csv"],
+        key="riskgate_uploaded_csv",
+    )
+
+use_default_dataset = (input_mode == "Default scoring dataset")
 
 if uploaded_file is not None:
     file_bytes = uploaded_file.getvalue()
