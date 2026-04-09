@@ -1,0 +1,4 @@
+artifact,created_at_utc,engine_version,t_low,t_high,note
+model_metadata.json,2026-03-30T06:07:27.134097+00:00,0.2.1,0.1,0.28,Primary training metadata for retained final bundle.
+policy_summary.json,2026-03-30T06:07:27.134097+00:00,0.2.1,0.1,0.28,"Validation policy summary. Approve=0.485, Review=0.299, Reject=0.216"
+parity_report.json,2026-03-11T18:03:07.889218+00:00,0.2.0,0.1,0.28,"Scored rows=78237, approve=47010, review=16007, reject=15220"

@@ -1,0 +1,4 @@
+variant,roc_auc,average_precision,brier,notes
+Notebook reference (frozen notebook recipe),0.9097792632943688,0.7852013757526998,0.0807392954093243,Reference analytics result used to motivate retained artifact choice.
+Validation XGBoost (uncalibrated),0.9088303152275412,0.7842431016712126,0.08083720843986256,Retained deployment variant in final bundle.
+Validation XGBoost (calibrated),0.9094030753236639,0.7855067307600833,0.08239742683643467,Candidate post-hoc calibration layer; not retained.
